@@ -13,13 +13,13 @@
     "framer-motion": "^10.18.0",
     "happy-tts-frontend": "file:",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0",
+    "react-dom": "^19.1.0",
     "react-router-dom": "^7.6.2"
   },
   "devDependencies": {
     "@types/javascript-obfuscator": "^0.17.0",
     "@types/react": "^18.2.15",
-    "@types/react-dom": "^18.2.7",
+    "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.0.3",
     "autoprefixer": "^10.4.16",
     "javascript-obfuscator": "^4.1.1",
