@@ -114,7 +114,13 @@ const App: React.FC = () => {
         <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
           <Routes>
             <Route path="/" element={<TtsPage />} />
-            <Route path="/admin/users" element={<UserManagement token={localStorage.getItem('token') || ''} />} />
+            <Route path="/admin/users" element={
+              user?.role === 'admin' ? (
+                <UserManagement token={localStorage.getItem('token') || ''} />
+              ) : (
+                <Navigate to="/" replace />
+              )
+            } />
             <Route path="/policy" element={
               user ? (
                 <motion.div
@@ -279,7 +285,13 @@ const App: React.FC = () => {
               <Navigate to="/welcome" replace state={{ from: location.pathname }} />
             )
           } />
-          <Route path="/admin/users" element={<UserManagement token={localStorage.getItem('token') || ''} />} />
+          <Route path="/admin/users" element={
+            user?.role === 'admin' ? (
+              <UserManagement token={localStorage.getItem('token') || ''} />
+            ) : (
+              <Navigate to="/" replace />
+            )
+          } />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
