@@ -58,7 +58,7 @@ const App: React.FC = () => {
           className="bg-white/80 backdrop-blur-lg shadow-lg"
         >
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex justify-between h-16">
+            <div className="flex justify-between items-center h-16">
               <motion.div
                 className="flex items-center space-x-2"
                 whileHover={{ scale: 1.05 }}
@@ -114,13 +114,6 @@ const App: React.FC = () => {
         <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
           <Routes>
             <Route path="/" element={<TtsPage />} />
-            <Route path="/admin/users" element={
-              user?.role === 'admin' ? (
-                <UserManagement token={localStorage.getItem('token') || ''} />
-              ) : (
-                <Navigate to="/" replace />
-              )
-            } />
             <Route path="/policy" element={
               user ? (
                 <motion.div
@@ -132,6 +125,13 @@ const App: React.FC = () => {
                 </motion.div>
               ) : (
                 <Navigate to="/welcome" replace state={{ from: location.pathname }} />
+              )
+            } />
+            <Route path="/admin/users" element={
+              user?.role === 'admin' ? (
+                <UserManagement token={localStorage.getItem('token') || ''} />
+              ) : (
+                <Navigate to="/" replace />
               )
             } />
             <Route path="*" element={<Navigate to="/" replace />} />
@@ -186,7 +186,7 @@ const App: React.FC = () => {
         className="bg-white/80 backdrop-blur-lg shadow-lg"
       >
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16">
+          <div className="flex justify-between items-center h-16">
             <motion.div
               className="flex items-center space-x-2"
               whileHover={{ scale: 1.05 }}
