@@ -17,6 +17,7 @@ export interface User {
 export interface TOTPStatus {
   enabled: boolean;
   hasBackupCodes: boolean;
+  type?: string[];
 }
 
 export interface TOTPSetupData {
@@ -31,6 +32,12 @@ export interface TOTPErrorResponse {
   error: string;
   remainingAttempts?: number;
   lockedUntil?: number;
+  debug?: {
+    expectedToken: string;
+    prevToken: string;
+    nextToken: string;
+    message: string;
+  };
 }
 
 export interface TOTPVerificationResponse {
@@ -46,4 +53,10 @@ export interface TOTPEnableResponse {
 export interface TOTPDisableResponse {
   message: string;
   enabled: boolean;
+}
+
+export interface BackupCodesResponse {
+  backupCodes: string[];
+  remainingCount: number;
+  message: string;
 } 

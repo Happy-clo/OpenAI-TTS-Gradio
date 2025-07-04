@@ -2,25 +2,24 @@ import express from 'express';
 import { AuthController } from '../controllers/authController';
 import { authenticateToken } from '../middleware/authenticateToken';
 import { validateAuthInput } from '../middleware/authValidation';
-import rateLimiter from '../middleware/rateLimiter';
+import { createLimiter } from '../middleware/rateLimiter';
 import { logUserData } from '../middleware/userDataLogger';
 import logger from '../utils/logger';
 import bcrypt from 'bcrypt';
 import jwt, { SignOptions } from 'jsonwebtoken';
 import { config } from '../config/config';
-import prisma from '../lib/prisma';
 
 const router = express.Router();
 
 // 登录尝试限制
-const loginLimiter = rateLimiter({
+const loginLimiter = createLimiter({
     windowMs: config.loginRateLimit.windowMs,
     max: config.loginRateLimit.max,
     message: '登录尝试次数过多，请15分钟后再试'
 });
 
 // 注册限制
-const registerLimiter = rateLimiter({
+const registerLimiter = createLimiter({
     windowMs: config.registerRateLimit.windowMs,
     max: config.registerRateLimit.max,
     message: '注册尝试次数过多，请稍后再试'
@@ -31,13 +30,62 @@ const jwtSignOptions: SignOptions = {
     expiresIn: '24h'
 };
 
-// POST /api/auth/register - 用户注册
+/**
+ * @openapi
+ * /auth/register:
+ *   post:
+ *     summary: 用户注册
+ *     description: 用户注册接口
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               username:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: 注册成功
+ */
 router.post('/register', registerLimiter, validateAuthInput, logUserData, AuthController.register);
 
-// POST /api/auth/login - 用户登录
+/**
+ * @openapi
+ * /auth/login:
+ *   post:
+ *     summary: 用户登录
+ *     description: 用户登录接口
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               username:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: 登录成功
+ */
 router.post('/login', loginLimiter, validateAuthInput, AuthController.login);
 
-// GET /api/auth/me - 获取用户信息
+/**
+ * @openapi
+ * /auth/me:
+ *   get:
+ *     summary: 获取当前用户信息
+ *     description: 获取当前登录用户信息
+ *     responses:
+ *       200:
+ *         description: 用户信息
+ */
 router.get('/me', authenticateToken, AuthController.getCurrentUser);
 
 export default router; 

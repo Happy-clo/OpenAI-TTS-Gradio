@@ -3,17 +3,10 @@ import axios from 'axios';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { User } from '../types/auth';
 
-// 配置axios默认值
-axios.defaults.withCredentials = true;
-axios.defaults.headers.common['Content-Type'] = 'application/json';
-
 // 获取API基础URL
 const getApiBaseUrl = () => {
-    // 优先使用环境变量
-    if (import.meta.env.VITE_API_URL) {
-        return import.meta.env.VITE_API_URL;
-    }
-    // 回退到生产环境URL
+    if (import.meta.env.DEV) return '';
+    if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
     return 'https://tts-api.hapxs.com';
 };
 
@@ -22,7 +15,8 @@ const api = axios.create({
     baseURL: getApiBaseUrl(),
     withCredentials: true,
     headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
     },
     timeout: 5000 // 5秒超时
 });
@@ -40,6 +34,7 @@ export const useAuth = () => {
     const [user, setUser] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
     const [pendingTOTP, setPendingTOTP] = useState<{ userId: string; token: string } | null>(null);
+    const [pending2FA, setPending2FA] = useState<{ userId: string; token: string; type: string[] } | null>(null);
     const navigate = useNavigate();
     const location = useLocation();
     const [isChecking, setIsChecking] = useState(false);
@@ -148,27 +143,21 @@ export const useAuth = () => {
 
     const login = async (username: string, password: string) => {
         try {
-            const response = await api.post<{ user: User; token: string; requiresTOTP?: boolean }>('/api/auth/login', {
+            const response = await api.post<{ user: User; token: string; requires2FA?: boolean; twoFactorType?: string[] }>('/api/auth/login', {
                 identifier: username,
                 password
             });
-            
-            const { user, token, requiresTOTP } = response.data;
-            
-            if (requiresTOTP) {
-                // 需要TOTP验证
-                setPendingTOTP({ userId: user.id, token });
-                return { requiresTOTP: true, user, token };
+            const { user, token, requires2FA, twoFactorType } = response.data;
+            if (requires2FA && twoFactorType && twoFactorType.length > 0) {
+                setPending2FA({ userId: user.id, token, type: twoFactorType });
+                return { requires2FA: true, user, token, twoFactorType };
             } else {
-                // 直接登录成功
                 localStorage.setItem('token', token);
                 setUser(user);
-                // 登录成功后立即更新检查时间，避免重复请求
                 lastCheckRef.current = Date.now();
                 setLastCheckTime(Date.now());
-                // 使用页面刷新而不是路由跳转
                 window.location.reload();
-                return { requiresTOTP: false };
+                return { requires2FA: false };
             }
         } catch (error: any) {
             const msg = error.response?.data?.error || error.message || '登录失败，请检查网络或稍后重试';
@@ -271,44 +260,25 @@ export const useAuth = () => {
     };
 
     const logout = async () => {
-        try {
-            const token = localStorage.getItem('token');
-            console.log('开始登出流程，token存在:', !!token);
-            
-            if (token) {
-                const response = await api.post('/api/auth/logout', {}, {
-                    headers: { Authorization: `Bearer ${token}` }
-                });
-                console.log('登出请求成功:', response.status, response.data);
-            } else {
-                console.log('没有找到token，直接清理本地状态');
-            }
-        } catch (error: any) {
-            console.error('登出请求失败:', {
-                message: error.message,
-                status: error.response?.status,
-                data: error.response?.data,
-                url: error.config?.url,
-                baseURL: api.defaults.baseURL
-            });
-            // 即使后端请求失败，也要清理本地状态
-        } finally {
-            console.log('清理本地状态');
-            localStorage.removeItem('token');
-            setUser(null);
-            setPendingTOTP(null);
-            setIsAdminChecked(false);
-            navigate('/welcome');
-        }
+        // 只清除本地 token 和用户状态，不请求后端接口
+        localStorage.removeItem('token');
+        setUser(null);
+        setPendingTOTP(null);
+        setPending2FA(null);
+        setIsAdminChecked(false);
+        navigate('/welcome');
     };
 
     return {
         user,
         loading,
         pendingTOTP,
+        pending2FA,
+        setPending2FA,
         login,
         verifyTOTP,
         register,
-        logout
+        logout,
+        api
     };
 }; 

@@ -1,16 +1,18 @@
 export interface TtsRequest {
   text: string;
-  voice: string;
   model: string;
-  output_format: string;
+  voice: string;
+  outputFormat: string;
   speed: number;
   userId?: string;
   isAdmin?: boolean;
+  customFileName?: string;
   generationCode: string;
 }
 
 export interface TtsResponse {
+  success: boolean;
   audioUrl: string;
-  isDuplicate?: boolean;
   signature: string;
+  isDuplicate?: boolean;
 } 

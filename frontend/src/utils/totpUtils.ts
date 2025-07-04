@@ -13,12 +13,16 @@ export const handleTOTPError = (error: any): string => {
   } else if (errorData?.remainingAttempts !== undefined) {
     // 显示剩余尝试次数
     const remainingAttempts = errorData.remainingAttempts;
+    let message = '';
+    
     if (remainingAttempts === 0) {
       const remainingTime = Math.ceil((errorData.lockedUntil! - Date.now()) / 1000 / 60);
-      return `验证码错误，账户已被锁定，请${remainingTime}分钟后再试`;
+      message = `验证码错误，账户已被锁定，请${remainingTime}分钟后再试`;
     } else {
-      return `验证码错误，还剩${remainingAttempts}次尝试机会`;
+      message = `验证码错误，还剩${remainingAttempts}次尝试机会`;
     }
+    
+    return message;
   } else {
     return errorData?.error || '验证失败';
   }

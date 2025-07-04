@@ -5,6 +5,21 @@ import time
 from io import StringIO
 from dotenv import load_dotenv
 import logging
+import requests
+from datetime import datetime
+
+
+class InMemoryLogHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.logs = []
+
+    def emit(self, record):
+        self.logs.append(self.format(record))
+
+    def get_logs(self):
+        return "\n".join(self.logs)
+
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -12,11 +27,27 @@ logging.basicConfig(
 
 load_dotenv()
 
+# 替换logging.basicConfig，增加内存日志收集
+in_memory_handler = InMemoryLogHandler()
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+in_memory_handler.setFormatter(formatter)
+logging.getLogger().addHandler(in_memory_handler)
+
 
 def remote_login(server_address, username, port, private_key):
     private_key_obj = paramiko.RSAKey.from_private_key(StringIO(private_key))
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    # 在CI/CD环境中，允许首次连接未知主机
+    if os.getenv("CI") or os.getenv("GITHUB_ACTIONS"):
+        # CI/CD环境：使用AutoAddPolicy但记录警告
+        logging.warning("CI/CD环境：自动接受未知主机密钥（仅用于部署）")
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    else:
+        # 生产环境：使用严格的策略
+        ssh.load_system_host_keys()  # 加载~/.ssh/known_hosts
+        ssh.set_missing_host_key_policy(paramiko.RejectPolicy())  # 拒绝未知主机
+
     ssh.connect(
         hostname=server_address, username=username, port=port, pkey=private_key_obj
     )
@@ -110,7 +141,7 @@ def recreate_container(ssh, old_container_name, new_image_url):
                 # 添加 SELinux 标签选项
                 selinux_label = mount.get("SELinuxRelabel", "")
                 if selinux_label:
-                    mount_opts.append(f"Z" if selinux_label == "shared" else "z")
+                    mount_opts.append("Z" if selinux_label == "shared" else "z")
 
                 # 添加其他模式选项
                 if mode:
@@ -202,37 +233,123 @@ def cleanup_unused_images(ssh):
     logging.error(stderr.read().decode())
 
 
+def upload_log_file(log_path, admin_password):
+    """
+    上传日志/文件到 https://tts-api.hapxs.com/api/sharelog，返回短链。
+    """
+    if not os.path.exists(log_path):
+        logging.warning(f"日志文件 {log_path} 不存在，跳过上传。")
+        return None
+    file_size = os.path.getsize(log_path)
+    if file_size >= 25600:
+        logging.warning(f"日志文件大于25KB（{file_size}字节），不上传。")
+        return None
+    url = "https://tts-api.hapxs.com/api/sharelog"
+    with open(log_path, "rb") as f:
+        files = {"file": (os.path.basename(log_path), f)}
+        data = {"adminPassword": admin_password}
+        try:
+            resp = requests.post(url, files=files, data=data, timeout=15)
+            if resp.ok and "link" in resp.json():
+                link = resp.json()["link"]
+                logging.info(f"日志已上传: {link}")
+                return link
+            else:
+                logging.warning(f"API响应异常: {resp.text}")
+        except Exception as e:
+            logging.warning(f"API上传日志失败: {repr(e)}")
+    return None
+
+
+def query_log_file(log_id, admin_password):
+    """
+    查询日志内容，POST到 https://tts-api.hapxs.com/api/sharelog/{id}，body为{adminPassword}
+    """
+    url = f"https://tts-api.hapxs.com/api/sharelog/{log_id}"
+    data = {"adminPassword": admin_password}
+    try:
+        resp = requests.post(url, json=data, timeout=10)
+        if resp.ok and "content" in resp.json():
+            return resp.json()["content"]
+        else:
+            logging.warning(f"日志查询失败: {resp.text}")
+    except Exception as e:
+        logging.warning(f"日志查询异常: {repr(e)}")
+    return None
+
+
+def write_deploy_log(server_address, username, container_names, image_url):
+    log_path = "deploy.log"
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(f"部署时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"服务器: {server_address}\n")
+        f.write(f"用户名: {username}\n")
+        f.write(f"容器: {', '.join(container_names)}\n")
+        f.write(f"镜像: {image_url}\n")
+        f.write("\n--- 运行日志 ---\n")
+        f.write(in_memory_handler.get_logs())
+    return log_path
+
+
 def main():
-    server_address = os.getenv("SERVER_ADDRESS")
-    username = os.getenv("USERNAME")
-    port = int(os.getenv("PORT", 22))
-    private_key = os.getenv("PRIVATE_KEY")
-    image_url = os.getenv("IMAGE_URL")
-    container_names = os.getenv("CONTAINER_NAMES").split("&")
+    image_url = os.getenv("IMAGE_URL", "").strip()
+    server_addresses = os.getenv("SERVER_ADDRESS", "").split(",")
+    usernames = os.getenv("USERNAME", "").split(",")
+    ports = os.getenv("PORT", "22").split(",")
+    private_keys = os.getenv("PRIVATE_KEY", "").split(",")
+    container_names_list = os.getenv("CONTAINER_NAMES", "").split(",")
+    admin_password = os.getenv("ADMIN_PASSWORD", "")
 
-    if not all([server_address, username, private_key]):
-        logging.error("请确保 SERVER_ADDRESS, USERNAME 和 PRIVATE_KEY 环境变量已设置。")
+    num_servers = len(server_addresses)
+    if not all(
+        [
+            len(server_addresses)
+            == len(usernames)
+            == len(ports)
+            == len(private_keys)
+            == len(container_names_list)
+        ]
+    ):
+        logging.error("请确保所有服务器相关环境变量数量一致，并用英文逗号分隔。")
         return
 
-    ssh = remote_login(server_address, username, port, private_key)
-    image_url = os.getenv("IMAGE_URL")
+    for i in range(num_servers):
+        server_address = server_addresses[i].strip()
+        username = usernames[i].strip()
+        port = int(ports[i].strip()) if ports[i].strip() else 22
+        private_key = private_keys[i].strip()
+        container_names = [
+            name.strip() for name in container_names_list[i].split("&") if name.strip()
+        ]
 
-    if not image_url:
-        return
-
-    for container_name in container_names:
-        container_name = container_name.strip()
-        logging.info(f"正在处理容器：{container_name}")
-        backup_file = backup_container_settings(ssh, container_name)
-
-        if not backup_file:
+        if not all([server_address, username, private_key, image_url, container_names]):
+            logging.error(f"第{i+1}组服务器配置有缺失，请检查环境变量。")
             continue
 
-        pull_docker_image(ssh, image_url)
-        recreate_container(ssh, container_name, image_url)
+        logging.info(f"\n===== 正在处理服务器: {server_address} =====")
+        ssh = remote_login(server_address, username, port, private_key)
 
-    cleanup_unused_images(ssh)
-    ssh.close()
+        for container_name in container_names:
+            logging.info(f"正在处理容器：{container_name}")
+            backup_file = backup_container_settings(ssh, container_name)
+            if not backup_file:
+                continue
+            pull_docker_image(ssh, image_url)
+            recreate_container(ssh, container_name, image_url)
+
+        cleanup_unused_images(ssh)
+        ssh.close()
+
+        # 自动生成并上传日志
+        time.sleep(2)  # 等待2秒，确保日志文件已生成
+        log_path = write_deploy_log(
+            server_address, username, container_names, image_url
+        )
+        link = upload_log_file(log_path, admin_password)
+        if link:
+            logging.info(f"日志已上传: {link}")
+        else:
+            logging.info("日志上传失败或未上传。")
 
 
 if __name__ == "__main__":

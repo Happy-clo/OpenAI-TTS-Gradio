@@ -3,6 +3,12 @@ import QRCode from 'qrcode';
 import crypto from 'crypto';
 import logger from '../utils/logger';
 
+// 确保时区设置为上海
+if (process.env.TZ !== 'Asia/Shanghai') {
+    process.env.TZ = 'Asia/Shanghai';
+    logger.info('TOTP服务时区已设置为上海');
+}
+
 export class TOTPService {
     /**
      * 生成TOTP密钥
@@ -19,12 +25,12 @@ export class TOTPService {
             const secret = speakeasy.generateSecret({
                 name: `${serviceName} (${username})`,
                 issuer: serviceName,
-                length: 32
+                length: 20 // 20字节 = 32字符的base32编码（标准TOTP密钥长度）
             });
             if (!secret.base32) {
                 throw new Error('TOTP密钥生成失败');
             }
-            logger.info('TOTP密钥生成成功:', { username, serviceName });
+            logger.info('TOTP密钥生成成功:', { username, serviceName, secretLength: secret.base32.length });
             return secret.base32;
         } catch (error) {
             logger.error('生成TOTP密钥失败:', error);
@@ -49,16 +55,19 @@ export class TOTPService {
         try {
             // 确保用户名不包含特殊字符，避免URL编码问题
             const safeUsername = username.replace(/[^a-zA-Z0-9_-]/g, '_');
-            const safeServiceName = serviceName.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const safeServiceName = serviceName.replace(/[^a-zA-Z0-9_-]/g, '-');
             
+            // 直接使用speakeasy.otpauthURL方法，传入base32密钥并指定编码
             const otpauthUrl = speakeasy.otpauthURL({
-                secret,
-                label: safeUsername,
+                secret: secret,
+                label: `${safeServiceName}:${safeUsername}`,
                 issuer: safeServiceName,
+                encoding: 'base32', // 明确指定传入的是base32编码
                 algorithm: 'sha1',
                 digits: 6,
                 period: 30
             });
+            
             if (!otpauthUrl) {
                 throw new Error('生成otpauth URL失败');
             }
@@ -149,6 +158,22 @@ export class TOTPService {
                 logger.error('TOTP验证window参数无效:', { window });
                 return false;
             }
+
+            // 记录当前时间和时区信息
+            const now = new Date();
+            const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            const currentTime = now.toISOString();
+            const localTime = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+            
+            logger.info('TOTP验证开始:', { 
+                token, 
+                timeZone, 
+                currentTime, 
+                localTime,
+                window,
+                serverTime: now.getTime()
+            });
+
             const result = speakeasy.totp.verify({
                 secret,
                 encoding: 'base32',
@@ -156,7 +181,15 @@ export class TOTPService {
                 window,
                 step: 30
             });
-            logger.info('TOTP验证结果:', { token, result, window });
+
+            logger.info('TOTP验证结果:', { 
+                token, 
+                result, 
+                window,
+                timeZone,
+                currentTime,
+                localTime
+            });
             return result;
         } catch (error) {
             logger.error('验证TOTP令牌失败:', error);

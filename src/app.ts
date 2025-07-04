@@ -1,5 +1,8 @@
 'use server';
 
+// 设置时区为上海
+process.env.TZ = 'Asia/Shanghai';
+
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -29,6 +32,10 @@ import libreChatRoutes from './routes/libreChatRoutes';
 import dataCollectionRoutes from './routes/dataCollectionRoutes';
 import { AuthController, isAdminToken, registerLogoutRoute } from './controllers/authController';
 import { adminController } from 'controllers/adminController';
+import swaggerJSDoc from 'swagger-jsdoc';
+import swaggerUi from 'swagger-ui-express';
+import logRoutes from './routes/logRoutes';
+import passkeyRoutes from './routes/passkeyRoutes';
 
 // 扩展 Request 类型
 declare global {
@@ -42,8 +49,8 @@ declare global {
 const app = express();
 const execAsync = promisify(exec);
 
-// 设置信任代理 - 信任所有代理
-app.set('trust proxy', true);
+// 设置信任代理 - 只信任第一个代理（安全）
+app.set('trust proxy', 1);
 
 // 检查是否是本地 IP 的中间件
 const isLocalIp = (req: Request, res: Response, next: NextFunction) => {
@@ -138,6 +145,22 @@ const adminLimiter = rateLimit({
     }
 });
 
+// 前端路由限流器
+const frontendLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 150, // 限制每个IP每分钟150次请求
+    message: { error: '请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
 // 请求日志中间件
 app.use((req: Request, res: Response, next: NextFunction) => {
     logger.info(`收到请求: ${req.method} ${req.url}`, {
@@ -150,7 +173,14 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
 // Middleware
 app.use(cors({
-    origin: ['https://tts.hapx.one', 'https://tts.hapxs.com', 'http://localhost:3000'],
+    origin: [
+        'https://tts.hapx.one',
+        'https://tts.hapxs.com',
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'http://127.0.0.1:3001',
+        'http://192.168.137.1:3001'
+    ],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: [
@@ -166,6 +196,17 @@ app.use(cors({
     maxAge: 86400 // 预检请求的结果可以缓存24小时
 }));
 app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+            fontSrc: ["'self'", "https://fonts.gstatic.com"],
+            connectSrc: ["'self'", "https://api.ipify.org", "https://ipapi.co", "https://ipinfo.io"],
+            imgSrc: ["'self'", "data:", "https://api.ipify.org", "https://ipapi.co", "https://ipinfo.io"],
+            scriptSrc: ["'self'", "'unsafe-inline'"],
+            frameSrc: ["'self'", "https://tts.hapx.one",'https://tts-api-docs.hapxs.com']
+        }
+    },
     crossOriginResourcePolicy: { policy: "cross-origin" },
     crossOriginEmbedderPolicy: false
 }));
@@ -179,6 +220,181 @@ app.use('/api/tts/generate', ttsLimiter);
 app.use('/api/auth', authLimiter);
 app.use('/api/auth/me', meEndpointLimiter); // 为 /me 端点添加特殊的限流器
 app.use('/api/tts/history', historyLimiter);
+
+// 注册路由
+app.use('/api/tts', ttsRoutes);
+app.use('/api/auth', authRoutes);
+
+// TOTP路由限流器
+const totpLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000, // 5分钟
+    max: 20, // 限制每个IP每5分钟20次请求
+    message: { error: 'TOTP操作过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// Passkey路由限流器
+const passkeyLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000, // 5分钟
+    max: 30, // 限制每个IP每5分钟30次请求
+    message: { error: 'Passkey操作过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// 防篡改路由限流器
+const tamperLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 30, // 限制每个IP每分钟30次请求
+    message: { error: '防篡改验证请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// 命令路由限流器
+const commandLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 10, // 限制每个IP每分钟10次请求
+    message: { error: '命令执行请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// LibreChat路由限流器
+const libreChatLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 60, // 限制每个IP每分钟60次请求
+    message: { error: 'LibreChat请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// 数据收集路由限流器
+const dataCollectionLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 30, // 限制每个IP每分钟30次请求
+    message: { error: '数据收集请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// 日志路由限流器
+const logsLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 20, // 限制每个IP每分钟20次请求
+    message: { error: '日志请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// 状态路由限流器
+const statusLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 60, // 限制每个IP每分钟60次请求
+    message: { error: '状态检查请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+app.use('/api/totp', totpLimiter);
+app.use('/api/passkey', passkeyLimiter);
+app.use('/api/tamper', tamperLimiter);
+app.use('/api/command', commandLimiter);
+app.use('/api/libre-chat', libreChatLimiter);
+app.use('/api/data-collection', dataCollectionLimiter);
+app.use('/api', logRoutes);
+app.use('/api/status', statusLimiter);
+
+// ========== Swagger OpenAPI 文档集成 ==========
+const swaggerOptions = {
+  definition: {
+    openapi: '3.0.0',
+    info: {
+      title: 'Happy-TTS API 文档',
+      version: '1.0.0',
+      description: '基于 OpenAPI 3.0 的接口文档'
+    }
+  },
+  apis: [
+    path.join(process.cwd(), 'src/routes/*.ts'),
+    path.join(process.cwd(), 'dist/routes/*.js')
+  ],
+};
+const swaggerSpec = swaggerJSDoc(swaggerOptions);
+
+// openapi.json 路由（必须在最前面）
+const openapiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 10, // 每个IP每分钟最多10次
+  message: { error: '请求过于频繁，请稍后再试' }
+});
+app.get('/api/api-docs.json', openapiLimiter, (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(fs.readFileSync(path.join(process.cwd(), 'openapi.json'), 'utf-8'));
+});
+app.get('/api-docs.json', openapiLimiter, (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(fs.readFileSync(path.join(process.cwd(), 'openapi.json'), 'utf-8'));
+});
+// Swagger UI 路由
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // Static files
 const audioDir = path.join(__dirname, '../finish');
@@ -195,20 +411,36 @@ if (!fs.existsSync(audioDir)) {
 }
 
 // Routes
-app.use('/api/tts', ttsRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/totp', totpRoutes);
 app.use('/api/admin', adminLimiter, adminRoutes);
-app.use('/api', statusRouter);
+app.use('/api/status', statusRouter);
 
 // 添加篡改保护中间件
 app.use(tamperProtectionMiddleware);
 
 // 注册路由
-app.use('/api', tamperRoutes);
-app.use('/', commandRoutes);
-app.use('/', libreChatRoutes);
-app.use('/', dataCollectionRoutes);
+app.use('/api/tamper', tamperRoutes);
+app.use('/api/command', commandRoutes);
+app.use('/api/libre-chat', libreChatRoutes);
+app.use('/api/data-collection', dataCollectionRoutes);
+app.use('/api', logRoutes);
+app.use('/api/passkey', passkeyRoutes);
+
+// 完整性检测相关兜底接口限速
+const integrityLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 10, // 每分钟最多10次
+    message: { error: '请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => req.ip || req.socket.remoteAddress || 'unknown',
+    skip: (req: Request): boolean => req.isLocalIp || false
+});
+
+app.head('/api/proxy-test', integrityLimiter, (req, res) => res.sendStatus(200));
+app.get('/api/proxy-test', integrityLimiter, (req, res) => res.sendStatus(200));
+app.get('/api/timing-test', integrityLimiter, (req, res) => res.sendStatus(200));
 
 // 根路由重定向到前端
 app.get('/', (req, res) => {
@@ -233,10 +465,10 @@ const ipReportWhitelist = [
   /^10\./, /^192\.168\./, /^172\.(1[6-9]|2[0-9]|3[0-1])\./
 ];
 
-// 公网IP上报专用限流器（默认每分钟15次）
+// 公网IP上报专用限流器（默认每分钟25次）
 const ipReportLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 15,
+  max: 25,
   message: { error: 'IP上报过于频繁，请稍后再试' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -302,23 +534,25 @@ app.post('/api/report-ip', ipReportLimiter, async (req, res) => {
 const frontendPath = join(__dirname, '../frontend/dist');
 if (existsSync(frontendPath)) {
   app.use(express.static(frontendPath));
-  // 前端路由
-  app.get('*', (req, res) => {
+  // 前端 SPA 路由 - 只匹配非 /api /api-docs /static /openapi 开头的路径
+  app.get(/^\/(?!api|api-docs|static|openapi)(.*)/, frontendLimiter, (req, res) => {
     res.sendFile(join(frontendPath, 'index.html'));
   });
 } else {
   logger.warn('Frontend files not found at:', frontendPath);
 }
 
-// Error handling
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-  logger.error('服务器错误:', {
-    error: err.message,
-    stack: err.stack,
-    url: req.url,
-    method: req.method
+// 文档加载超时上报接口
+app.post('/api/report-docs-timeout', express.json(), (req, res) => {
+  const { url, timestamp, userAgent } = req.body;
+  logger.error('API文档加载超时', {
+    url,
+    timestamp: new Date(timestamp).toISOString(),
+    userAgent,
+    ip: req.ip,
+    headers: req.headers
   });
-  res.status(500).json({ error: 'Something broke!' });
+  res.json({ success: true });
 });
 
 // 404 处理
@@ -375,7 +609,8 @@ async function getIpLocation(ip: string): Promise<string> {
     }
     return '未找到位置';
   } catch (error) {
-    console.error(`获取 IP ${ip} 位置时出错:`, error);
+    // 避免外部输入直接作为格式化字符串
+    console.error('获取 IP 位置时出错:', { ip, error });
     return '获取位置时出错';
   }
 }
@@ -450,8 +685,8 @@ app.get('/ip', async (req, res) => {
 });
 
 // 服务器状态
-app.get('/server_status', (req, res) => {
-  const password = req.query.password as string;
+app.post('/server_status', (req, res) => {
+  const password = req.body.password;
 
   if (password === PASSWORD) {
     const bootTime = process.uptime();
@@ -495,6 +730,7 @@ app.listen(Number(PORT), '0.0.0.0', async () => {
   await ensureDirectories();
   logger.info(`服务器运行在 http://0.0.0.0:${PORT}`);
   logger.info(`Audio files directory: ${audioDir}`);
+  logger.info(`当前生成码: ${config.generationCode}`);
 });
 
 // 确保必要的目录存在

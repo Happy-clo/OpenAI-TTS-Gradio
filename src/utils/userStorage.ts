@@ -40,6 +40,17 @@ export interface User {
     totpSecret?: string;
     totpEnabled?: boolean;
     backupCodes?: string[];
+    passkeyEnabled?: boolean;
+    passkeyCredentials?: {
+        id: string;
+        name: string;
+        credentialID: string;
+        credentialPublicKey: string;
+        counter: number;
+        createdAt: string;
+    }[];
+    pendingChallenge?: string;
+    currentChallenge?: string;
 }
 
 export class UserStorage {
@@ -387,5 +398,28 @@ export class UserStorage {
             });
             throw error;
         }
+    }
+
+    public static async getUserByUsername(username: string): Promise<User | null> {
+        try {
+            const users = this.readUsers();
+            return users.find(u => u.username === username) || null;
+        } catch (error) {
+            logger.error('通过用户名获取用户失败:', {
+                error,
+                username
+            });
+            throw error;
+        }
+    }
+
+    public static async updateUser(userId: string, updates: Partial<User>): Promise<User | null> {
+        const users = this.readUsers();
+        const idx = users.findIndex(u => u.id === userId);
+        if (idx === -1) return null;
+        // 合并所有字段，支持追加 passkeyCredentials
+        users[idx] = { ...users[idx], ...updates };
+        this.writeUsers(users);
+        return users[idx];
     }
 } 
