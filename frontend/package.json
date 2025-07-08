@@ -3,9 +3,18 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "sideEffects": [
+    "*.css",
+    "*.scss",
+    "*.sass",
+    "*.less"
+  ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "node --max-old-space-size=8192 ./node_modules/.bin/tsc && node --max-old-space-size=8192 ./node_modules/.bin/vite build",
+    "build:simple": "node --max-old-space-size=4096 ./node_modules/.bin/tsc && node --max-old-space-size=4096 ./node_modules/.bin/vite build --mode simple",
+    "build:minimal": "node --max-old-space-size=2048 ./node_modules/.bin/tsc && node --max-old-space-size=2048 ./node_modules/.bin/vite build --mode minimal",
+    "build:analyze": "tsc && vite build --mode analyze",
     "preview": "vite preview",
     "test": "vitest"
   },
@@ -13,8 +22,8 @@
     "@heroicons/react": "^2.2.0",
     "@prisma/client": "^6.11.1",
     "@radix-ui/react-dialog": "^1.1.14",
-    "@simplewebauthn/browser": "^13.1.0",
-    "@simplewebauthn/server": "^7.4.0",
+    "@simplewebauthn/browser": "^13.1.2",
+    "@simplewebauthn/server": "^13.1.2",
     "@simplewebauthn/types": "^12.0.0",
     "@types/axios": "^0.14.4",
     "@types/bcrypt": "^5.0.2",
@@ -59,7 +68,7 @@
     "tailwindcss": "^3.3.3",
     "terser": "^5.43.0",
     "typescript": "^5.0.2",
-    "vite": "^7.0.0",
+    "vite": "^7.0.2",
     "vite-plugin-obfuscator": "^1.0.5",
     "vitest": "^3.2.4"
   }

@@ -1,5 +1,3 @@
-'use server';
-
 // 设置时区为上海
 process.env.TZ = 'Asia/Shanghai';
 
@@ -36,6 +34,14 @@ import swaggerJSDoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
 import logRoutes from './routes/logRoutes';
 import passkeyRoutes from './routes/passkeyRoutes';
+import { passkeyAutoFixMiddleware, passkeyErrorHandler } from './middleware/passkeyAutoFix';
+import ipfsRoutes from './routes/ipfsRoutes';
+import networkRoutes from './routes/networkRoutes';
+import dataProcessRoutes from './routes/dataProcessRoutes';
+import mediaRoutes from './routes/mediaRoutes';
+import socialRoutes from './routes/socialRoutes';
+import lifeRoutes from './routes/lifeRoutes';
+import { PasskeyDataRepairService } from './services/passkeyDataRepairService';
 
 // 扩展 Request 类型
 declare global {
@@ -55,7 +61,12 @@ app.set('trust proxy', 1);
 // 检查是否是本地 IP 的中间件
 const isLocalIp = (req: Request, res: Response, next: NextFunction) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
-    req.isLocalIp = config.localIps.includes(ip);
+    // DEV环境下不跳过二次校验，isLocalIp始终为false
+    if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'dev') {
+        req.isLocalIp = false;
+    } else {
+        req.isLocalIp = config.localIps.includes(ip);
+    }
     next();
 };
 
@@ -68,7 +79,7 @@ const ttsLimiter = rateLimit({
     legacyHeaders: false,
     // 添加 IP 地址获取方法
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     // 跳过本地 IP 的限制
@@ -85,7 +96,7 @@ const authLimiter = rateLimit({
     legacyHeaders: false,
     // 添加 IP 地址获取方法
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     // 跳过本地 IP 的限制
@@ -102,7 +113,7 @@ const historyLimiter = rateLimit({
     legacyHeaders: false,
     // 添加 IP 地址获取方法
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     // 跳过本地 IP 的限制
@@ -120,7 +131,7 @@ const meEndpointLimiter = rateLimit({
     legacyHeaders: false,
     // 添加 IP 地址获取方法
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     // 跳过本地 IP 的限制
@@ -137,7 +148,7 @@ const adminLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     skip: (req: Request): boolean => {
@@ -153,7 +164,7 @@ const frontendLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     skip: (req: Request): boolean => {
@@ -171,29 +182,44 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     next();
 });
 
-// Middleware
+// 允许的域名
+const allowedOrigins = [
+  'https://tts.hapx.one',
+  'https://tts.hapxs.com',
+  'https://tts-api.hapxs.com',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3001',
+  'http://192.168.137.1:3001',
+  'http://192.168.10.7:3001'
+];
+
 app.use(cors({
-    origin: [
-        'https://tts.hapx.one',
-        'https://tts.hapxs.com',
-        'http://localhost:3000',
-        'http://localhost:3001',
-        'http://127.0.0.1:3001',
-        'http://192.168.137.1:3001'
-    ],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: [
-        'Content-Type',
-        'Authorization',
-        'X-Requested-With',
-        'Accept',
-        'Origin',
-        'Access-Control-Request-Method',
-        'Access-Control-Request-Headers'
-    ],
-    exposedHeaders: ['Content-Length', 'X-RateLimit-Limit', 'X-RateLimit-Remaining'],
-    maxAge: 86400 // 预检请求的结果可以缓存24小时
+  origin: function(origin, callback) {
+    // 允许本地无origin的情况（如curl、postman等）
+    if (!origin) return callback(null, true);
+    // 允许所有 *.hapxs.com
+    if (/^https:\/\/([a-zA-Z0-9-]+\.)*hapxs\.com$/.test(origin)) {
+      return callback(null, true);
+    }
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'), false);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'Access-Control-Request-Method',
+    'Access-Control-Request-Headers'
+  ],
+  exposedHeaders: ['Content-Length', 'X-RateLimit-Limit', 'X-RateLimit-Remaining'],
+  maxAge: 86400 // 预检请求的结果可以缓存24小时
 }));
 app.use(helmet({
     contentSecurityPolicy: {
@@ -201,8 +227,23 @@ app.use(helmet({
             defaultSrc: ["'self'"],
             styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
             fontSrc: ["'self'", "https://fonts.gstatic.com"],
-            connectSrc: ["'self'", "https://api.ipify.org", "https://ipapi.co", "https://ipinfo.io"],
-            imgSrc: ["'self'", "data:", "https://api.ipify.org", "https://ipapi.co", "https://ipinfo.io"],
+            connectSrc: [
+                "'self'",
+                "https://*.hapxs.com",
+                "https://api.ipify.org",
+                "https://ipapi.co",
+                "https://ipinfo.io",
+                "https://api.ip.sb",
+                "https://cdn.shopimgs.com"
+            ],
+            imgSrc: [
+                "'self'",
+                "data:",
+                "https://api.ipify.org",
+                "https://ipapi.co",
+                "https://ipinfo.io",
+                "https://api.ip.sb"
+            ],
             scriptSrc: ["'self'", "'unsafe-inline'"],
             frameSrc: ["'self'", "https://tts.hapx.one",'https://tts-api-docs.hapxs.com']
         }
@@ -223,7 +264,6 @@ app.use('/api/tts/history', historyLimiter);
 
 // 注册路由
 app.use('/api/tts', ttsRoutes);
-app.use('/api/auth', authRoutes);
 
 // TOTP路由限流器
 const totpLimiter = rateLimit({
@@ -233,7 +273,7 @@ const totpLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     skip: (req: Request): boolean => {
@@ -249,7 +289,7 @@ const passkeyLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     skip: (req: Request): boolean => {
@@ -265,7 +305,7 @@ const tamperLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     skip: (req: Request): boolean => {
@@ -281,7 +321,7 @@ const commandLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     skip: (req: Request): boolean => {
@@ -297,7 +337,7 @@ const libreChatLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     skip: (req: Request): boolean => {
@@ -313,7 +353,7 @@ const dataCollectionLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     skip: (req: Request): boolean => {
@@ -329,7 +369,103 @@ const logsLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// IPFS上传路由限流器
+const ipfsLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 10, // 限制每个IP每分钟10次上传请求
+    message: { error: '上传请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// 网络检测路由限流器
+const networkLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 30, // 限制每个IP每分钟30次网络检测请求
+    message: { error: '网络检测请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// 数据处理路由限流器
+const dataProcessLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 50, // 限制每个IP每分钟50次数据处理请求
+    message: { error: '数据处理请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// 媒体解析路由限流器
+const mediaLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 20, // 限制每个IP每分钟20次媒体解析请求
+    message: { error: '媒体解析请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// 社交媒体路由限流器
+const socialLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 30, // 限制每个IP每分钟30次社交媒体请求
+    message: { error: '社交媒体请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
+        return ip;
+    },
+    skip: (req: Request): boolean => {
+        return req.isLocalIp || false;
+    }
+});
+
+// 生活信息路由限流器
+const lifeLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 40, // 限制每个IP每分钟40次生活信息请求
+    message: { error: '生活信息请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => {
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     skip: (req: Request): boolean => {
@@ -345,7 +481,7 @@ const statusLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req: Request) => {
-        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
         return ip;
     },
     skip: (req: Request): boolean => {
@@ -359,7 +495,12 @@ app.use('/api/tamper', tamperLimiter);
 app.use('/api/command', commandLimiter);
 app.use('/api/libre-chat', libreChatLimiter);
 app.use('/api/data-collection', dataCollectionLimiter);
-app.use('/api', logRoutes);
+app.use('/api/ipfs', ipfsLimiter);
+app.use('/api/network', networkLimiter);
+app.use('/api/data', dataProcessLimiter);
+app.use('/api/media', mediaLimiter);
+app.use('/api/social', socialLimiter);
+app.use('/api/life', lifeLimiter);
 app.use('/api/status', statusLimiter);
 
 // ========== Swagger OpenAPI 文档集成 ==========
@@ -385,20 +526,47 @@ const openapiLimiter = rateLimit({
   max: 10, // 每个IP每分钟最多10次
   message: { error: '请求过于频繁，请稍后再试' }
 });
-app.get('/api/api-docs.json', openapiLimiter, (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.send(fs.readFileSync(path.join(process.cwd(), 'openapi.json'), 'utf-8'));
+app.get('/api/api-docs.json', openapiLimiter, async (req, res) => {
+  try {
+    res.setHeader('Content-Type', 'application/json');
+    const content = await fs.promises.readFile(path.join(process.cwd(), 'openapi.json'), 'utf-8');
+    res.send(content);
+  } catch (error) {
+    res.status(500).json({ error: '无法读取API文档' });
+  }
 });
-app.get('/api-docs.json', openapiLimiter, (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.send(fs.readFileSync(path.join(process.cwd(), 'openapi.json'), 'utf-8'));
+app.get('/api-docs.json', openapiLimiter, async (req, res) => {
+  try {
+    res.setHeader('Content-Type', 'application/json');
+    const content = await fs.promises.readFile(path.join(process.cwd(), 'openapi.json'), 'utf-8');
+    res.send(content);
+  } catch (error) {
+    res.status(500).json({ error: '无法读取API文档' });
+  }
 });
 // Swagger UI 路由
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.use('/api-docs', (req: Request, res: Response, next: NextFunction) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  res.removeHeader && res.removeHeader('ETag');
+  next();
+}, swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
+// 音频文件服务限流器
+const audioFileLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 50, // 每分钟最多50次音频文件请求
+  message: { error: '音频文件请求过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+  skip: (req: Request): boolean => req.isLocalIp || false
+});
 
 // Static files
 const audioDir = path.join(__dirname, '../finish');
-app.use('/static/audio', express.static(audioDir, {
+app.use('/static/audio', audioFileLimiter, express.static(audioDir, {
   setHeaders: (res) => {
     res.set('Cross-Origin-Resource-Policy', 'cross-origin');
     res.set('Access-Control-Allow-Origin', '*');
@@ -406,9 +574,12 @@ app.use('/static/audio', express.static(audioDir, {
 }));
 
 // 确保音频目录存在
-if (!fs.existsSync(audioDir)) {
-  fs.mkdirSync(audioDir, { recursive: true });
-}
+const ensureAudioDir = async () => {
+  if (!fs.existsSync(audioDir)) {
+    await fs.promises.mkdir(audioDir, { recursive: true });
+  }
+};
+ensureAudioDir().catch(console.error);
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -424,7 +595,14 @@ app.use('/api/tamper', tamperRoutes);
 app.use('/api/command', commandRoutes);
 app.use('/api/libre-chat', libreChatRoutes);
 app.use('/api/data-collection', dataCollectionRoutes);
+app.use('/api/ipfs', ipfsRoutes);
+app.use('/api/network', networkRoutes);
+app.use('/api/data', dataProcessRoutes);
+app.use('/api/media', mediaRoutes);
+app.use('/api/social', socialRoutes);
+app.use('/api/life', lifeRoutes);
 app.use('/api', logRoutes);
+app.use('/api/passkey', passkeyAutoFixMiddleware);
 app.use('/api/passkey', passkeyRoutes);
 
 // 完整性检测相关兜底接口限速
@@ -434,7 +612,7 @@ const integrityLimiter = rateLimit({
     message: { error: '请求过于频繁，请稍后再试' },
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req: Request) => req.ip || req.socket.remoteAddress || 'unknown',
+    keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
     skip: (req: Request): boolean => req.isLocalIp || false
 });
 
@@ -442,13 +620,35 @@ app.head('/api/proxy-test', integrityLimiter, (req, res) => res.sendStatus(200))
 app.get('/api/proxy-test', integrityLimiter, (req, res) => res.sendStatus(200));
 app.get('/api/timing-test', integrityLimiter, (req, res) => res.sendStatus(200));
 
+// 根路由限流器
+const rootLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 100, // 每分钟最多100次根路由访问
+  message: { error: '访问过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+  skip: (req: Request): boolean => req.isLocalIp || false
+});
+
 // 根路由重定向到前端
-app.get('/', (req, res) => {
+app.get('/', rootLimiter, (req, res) => {
   res.redirect('/index.html');
 });
 
-// IP 路由
-app.get('/ip', async (req, res) => {
+// IP查询路由限流器
+const ipQueryLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 30, // 每分钟最多30次IP查询
+  message: { error: 'IP查询过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+  skip: (req: Request): boolean => req.isLocalIp || false
+});
+
+// IP 信息路由（使用 getIPInfo 服务）
+app.get('/ip', ipQueryLimiter, async (req, res) => {
   try {
     const ip = (req.headers['x-real-ip'] as string) || req.ip || '127.0.0.1';
     const ipInfo = await getIPInfo(ip);
@@ -472,9 +672,9 @@ const ipReportLimiter = rateLimit({
   message: { error: 'IP上报过于频繁，请稍后再试' },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.ip || req.socket.remoteAddress || 'unknown',
+  keyGenerator: (req) => req.ip || (req.socket?.remoteAddress) || 'unknown',
   skip: (req) => {
-    const ip = req.ip || req.socket.remoteAddress || '';
+    const ip = req.ip || (req.socket?.remoteAddress) || '';
     // 白名单IP直接跳过限流
     return ipReportWhitelist.some(rule =>
       typeof rule === 'string' ? ip === rule : rule.test(ip)
@@ -530,10 +730,21 @@ app.post('/api/report-ip', ipReportLimiter, async (req, res) => {
   }
 });
 
+// 静态文件服务限流器
+const staticFileLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 200, // 每分钟最多200次静态文件请求
+  message: { error: '静态文件请求过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+  skip: (req: Request): boolean => req.isLocalIp || false
+});
+
 // 静态文件服务
 const frontendPath = join(__dirname, '../frontend/dist');
 if (existsSync(frontendPath)) {
-  app.use(express.static(frontendPath));
+  app.use('/static', staticFileLimiter, express.static(frontendPath));
   // 前端 SPA 路由 - 只匹配非 /api /api-docs /static /openapi 开头的路径
   app.get(/^\/(?!api|api-docs|static|openapi)(.*)/, frontendLimiter, (req, res) => {
     res.sendFile(join(frontendPath, 'index.html'));
@@ -542,8 +753,19 @@ if (existsSync(frontendPath)) {
   logger.warn('Frontend files not found at:', frontendPath);
 }
 
+// 文档加载超时上报接口限流器
+const docsTimeoutLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 5, // 每分钟最多5次上报
+  message: { error: '上报过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+  skip: (req: Request): boolean => req.isLocalIp || false
+});
+
 // 文档加载超时上报接口
-app.post('/api/report-docs-timeout', express.json(), (req, res) => {
+app.post('/api/report-docs-timeout', docsTimeoutLimiter, express.json(), (req, res) => {
   const { url, timestamp, userAgent } = req.body;
   logger.error('API文档加载超时', {
     url,
@@ -555,8 +777,33 @@ app.post('/api/report-docs-timeout', express.json(), (req, res) => {
   res.json({ success: true });
 });
 
+// 全局默认限流器（保护未明确限速的路由）
+const globalDefaultLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 100, // 每分钟最多100次请求
+  message: { error: '请求过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+  skip: (req: Request): boolean => req.isLocalIp || false
+});
+
+// 404处理限流器
+const notFoundLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 50, // 每分钟最多50次404请求
+  message: { error: '请求过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+  skip: (req: Request): boolean => req.isLocalIp || false
+});
+
+// 应用全局默认限流器
+app.use(globalDefaultLimiter);
+
 // 404 处理
-app.use((req: Request, res: Response) => {
+app.use(notFoundLimiter, (req: Request, res: Response) => {
   logger.warn(`404 Not Found: ${req.method} ${req.url}`, {
     ip: req.ip,
     headers: req.headers,
@@ -641,8 +888,19 @@ async function readIpData(): Promise<Record<string, string>> {
   return ipData;
 }
 
-// 路由处理
-app.get('/ip', async (req, res) => {
+// IP位置查询路由限流器
+const ipLocationLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 20, // 每分钟最多20次IP位置查询
+  message: { error: 'IP位置查询过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+  skip: (req: Request): boolean => req.isLocalIp || false
+});
+
+// IP位置查询路由（使用外部API）
+app.get('/ip-location', ipLocationLimiter, async (req, res) => {
   const providedIp = req.query.ip as string;
   const realTime = req.query['real-time'] !== undefined;
 
@@ -684,8 +942,19 @@ app.get('/ip', async (req, res) => {
   });
 });
 
+// 服务器状态查询限流器
+const serverStatusLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 10, // 每分钟最多10次状态查询
+  message: { error: '状态查询过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+  skip: (req: Request): boolean => req.isLocalIp || false
+});
+
 // 服务器状态
-app.post('/server_status', (req, res) => {
+app.post('/server_status', serverStatusLimiter, (req, res) => {
   const password = req.body.password;
 
   if (password === PASSWORD) {
@@ -721,18 +990,6 @@ app.post('/server_status', (req, res) => {
   return res.json(statusInfo);
 });
 
-// 注册登出接口
-registerLogoutRoute(app);
-
-// Start server
-const PORT = config.port;
-app.listen(Number(PORT), '0.0.0.0', async () => {
-  await ensureDirectories();
-  logger.info(`服务器运行在 http://0.0.0.0:${PORT}`);
-  logger.info(`Audio files directory: ${audioDir}`);
-  logger.info(`当前生成码: ${config.generationCode}`);
-});
-
 // 确保必要的目录存在
 const ensureDirectories = async () => {
   const dirs = ['logs', 'finish', 'data'];
@@ -743,4 +1000,53 @@ const ensureDirectories = async () => {
   }
 };
 
-export default app; 
+// 注册登出接口
+registerLogoutRoute(app);
+
+// Start server (only in non-test environment)
+if (process.env.NODE_ENV !== 'test') {
+  const PORT = config.port;
+  app.listen(Number(PORT), '0.0.0.0', async () => {
+    await ensureDirectories();
+    logger.info(`服务器运行在 http://0.0.0.0:${PORT}`);
+    logger.info(`生成音频目录: ${audioDir}`);
+    logger.info(`当前生成码: ${config.generationCode}`);
+    
+    // 启动时检查文件权限
+    try {
+      const { checkFilePermissions } = require('../scripts/check-file-permissions.js');
+      checkFilePermissions();
+    } catch (error) {
+      logger.warn('[启动] 文件权限检查失败，继续启动', { 
+        error: error instanceof Error ? error.message : String(error) 
+      });
+    }
+    
+    // 启动时自动修复Passkey数据
+    try {
+      logger.info('[启动] 开始自动修复Passkey数据...');
+      await PasskeyDataRepairService.repairAllUsersPasskeyData();
+      logger.info('[启动] Passkey数据自动修复完成');
+    } catch (error) {
+      logger.error('[启动] Passkey数据自动修复失败', { 
+        error: error instanceof Error ? error.message : String(error) 
+      });
+      // 不阻止服务器启动，只记录错误
+    }
+  });
+}
+
+// 确保在测试环境中也能正确导出 Express 应用
+export default app;
+
+// 禁止二次校验相关接口缓存，防止304导致安全绕过
+app.use(['/api/totp/status', '/api/passkey/credentials', '/api/passkey/authenticate/start', '/api/passkey/authenticate/finish', '/api/passkey/register/start', '/api/passkey/register/finish', '/api/auth/me', '/api/auth/logout', '/api/auth/login', '/api/auth/register', '/api/totp/status'], (req: any, res: any, next: any) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  res.removeHeader && res.removeHeader('ETag');
+  next();
+});
+
+// 添加Passkey错误处理中间件
+app.use(passkeyErrorHandler); 

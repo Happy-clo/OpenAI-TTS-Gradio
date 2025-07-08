@@ -21,6 +21,14 @@ const api = axios.create({
     timeout: 5000 // 5秒超时
 });
 
+api.interceptors.request.use(config => {
+    const token = localStorage.getItem('token');
+    if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+});
+
 // 添加请求拦截器
 api.interceptors.response.use(
     (response) => response,
@@ -34,7 +42,7 @@ export const useAuth = () => {
     const [user, setUser] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
     const [pendingTOTP, setPendingTOTP] = useState<{ userId: string; token: string } | null>(null);
-    const [pending2FA, setPending2FA] = useState<{ userId: string; token: string; type: string[] } | null>(null);
+    const [pending2FA, setPending2FA] = useState<{ userId: string; token: string; type: string[]; username?: string } | null>(null);
     const navigate = useNavigate();
     const location = useLocation();
     const [isChecking, setIsChecking] = useState(false);
@@ -149,7 +157,17 @@ export const useAuth = () => {
             });
             const { user, token, requires2FA, twoFactorType } = response.data;
             if (requires2FA && twoFactorType && twoFactorType.length > 0) {
-                setPending2FA({ userId: user.id, token, type: twoFactorType });
+                // 记录二次验证信息（不输出到控制台）
+                const twoFactorInfo = {
+                    action: '登录需要二次验证',
+                    userId: user.id,
+                    username: user.username,
+                    twoFactorType,
+                    requires2FA,
+                    timestamp: new Date().toISOString()
+                };
+                
+                setPending2FA({ userId: user.id, token, type: twoFactorType, username: user.username });
                 return { requires2FA: true, user, token, twoFactorType };
             } else {
                 localStorage.setItem('token', token);
@@ -163,6 +181,15 @@ export const useAuth = () => {
             const msg = error.response?.data?.error || error.message || '登录失败，请检查网络或稍后重试';
             throw new Error(msg);
         }
+    };
+
+    // 新增：使用 token 和用户信息直接登录（用于 Passkey 认证）
+    const loginWithToken = async (token: string, user: User) => {
+        localStorage.setItem('token', token);
+        setUser(user);
+        lastCheckRef.current = Date.now();
+        setLastCheckTime(Date.now());
+        window.location.reload(); // Passkey 登录后强制刷新，确保新 token 生效
     };
 
     const verifyTOTP = async (token: string, backupCode?: string) => {
@@ -188,8 +215,7 @@ export const useAuth = () => {
                 // 登录成功后立即更新检查时间，避免重复请求
                 lastCheckRef.current = Date.now();
                 setLastCheckTime(Date.now());
-                // 使用页面刷新而不是路由跳转
-                window.location.reload();
+                navigate('/welcome');
                 return true;
             } else {
                 throw new Error('TOTP验证失败');
@@ -233,7 +259,12 @@ export const useAuth = () => {
             });
             return response.data;
         } catch (error: any) {
-            console.error('获取用户信息失败:', error);
+            // 记录获取用户信息失败（不输出到控制台）
+            const getUserErrorInfo = {
+                action: '获取用户信息失败',
+                error: error instanceof Error ? error.message : String(error),
+                timestamp: new Date().toISOString()
+            };
             throw new Error('获取用户信息失败');
         }
     }, []);
@@ -251,8 +282,7 @@ export const useAuth = () => {
             // 注册成功后立即更新检查时间，避免重复请求
             lastCheckRef.current = Date.now();
             setLastCheckTime(Date.now());
-            // 使用页面刷新而不是路由跳转
-            window.location.reload();
+            navigate('/welcome');
         } catch (error: any) {
             const msg = error.response?.data?.error || error.message || '注册失败，请检查网络或稍后重试';
             throw new Error(msg);
@@ -276,6 +306,7 @@ export const useAuth = () => {
         pending2FA,
         setPending2FA,
         login,
+        loginWithToken,
         verifyTOTP,
         register,
         logout,

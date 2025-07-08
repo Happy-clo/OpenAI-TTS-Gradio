@@ -1,14 +1,10 @@
 import { Request, Response } from 'express';
 import { UserStorage, User } from '../utils/userStorage';
 import logger from '../utils/logger';
-import { config } from '../config/config';
 import fs from 'fs';
 import path from 'path';
 
 export class AuthController {
-    private static isLocalIp(ip: string): boolean {
-        return config.localIps.includes(ip);
-    }
 
     public static async register(req: Request, res: Response) {
         try {
@@ -75,24 +71,7 @@ export class AuthController {
                 timestamp: new Date().toISOString()
             };
 
-            // 检查是否是本地 IP
-            if (AuthController.isLocalIp(ip)) {
-                logger.info('本地 IP 访问，自动登录管理员账户', logDetails);
-                const adminUser = await UserStorage.getUserById('1');
-                if (!adminUser) {
-                    logger.error('管理员账户不存在，无法自动登录', logDetails);
-                    return res.status(500).json({ error: '管理员账户不存在' });
-                }
-                // 生成token（用id即可）
-                const token = adminUser.id;
-                // 写入token到users.json
-                updateUserToken(adminUser.id, token);
-                const { password: _, ...userWithoutPassword } = adminUser;
-                return res.json({
-                    user: userWithoutPassword,
-                    token
-                });
-            }
+
 
             logger.info('开始用户认证', logDetails);
 
@@ -120,7 +99,7 @@ export class AuthController {
                 // 兜底：只返回临时token和二次验证类型，禁止直接登录
                 // 必须通过TOTP或Passkey二次验证接口后，才发放正式token
                 const tempToken = user.id;
-                updateUserToken(user.id, tempToken, 5 * 60 * 1000); // 5分钟过期
+                await updateUserToken(user.id, tempToken, 5 * 60 * 1000); // 5分钟过期
                 const { password: _, ...userWithoutPassword } = user;
                 return res.json({
                     user: userWithoutPassword,
@@ -140,7 +119,7 @@ export class AuthController {
             // 生成token（用id即可）
             const token = user.id;
             // 写入token到users.json
-            updateUserToken(user.id, token);
+            await updateUserToken(user.id, token);
             // 不返回密码
             const { password: _, ...userWithoutPassword } = user;
             res.json({
@@ -163,56 +142,36 @@ export class AuthController {
         try {
             const ip = req.ip || 'unknown';
             const authHeader = req.headers.authorization;
-
-            // 检查是否是本地 IP
-            if (AuthController.isLocalIp(ip)) {
-                logger.info('本地 IP 访问，自动获取管理员信息', {
-                    ip,
-                    timestamp: new Date().toISOString()
-                });
-
-                const adminUser = await UserStorage.getUserById('1');
-                if (!adminUser) {
-                    return res.status(500).json({
-                        error: '管理员账户不存在'
-                    });
-                }
-
-                const remainingUsage = await UserStorage.getRemainingUsage(adminUser.id);
-                const { password: _, ...userWithoutPassword } = adminUser;
-
-                res.json({
-                    ...userWithoutPassword,
-                    remainingUsage
-                });
-                return;
-            }
-
             if (!authHeader || !authHeader.startsWith('Bearer ')) {
                 return res.status(401).json({
                     error: '未登录'
                 });
             }
-
             const token = authHeader.split(' ')[1];
             if (!token) {
                 return res.status(401).json({
                     error: '无效的认证令牌'
                 });
             }
-
-            // 从 token 中获取用户 ID
-            const userId = token; // 这里简化处理，实际应该解析 JWT token
+            
+            // 解析 JWT token 获取 userId
+            let userId: string;
+            try {
+                const decoded: any = require('jsonwebtoken').verify(token, require('../config/config').config.jwtSecret);
+                userId = decoded.userId;
+            } catch (e) {
+                return res.status(401).json({ error: '认证令牌无效或已过期' });
+            }
+            
             const user = await UserStorage.getUserById(userId);
             if (!user) {
                 return res.status(404).json({
                     error: '用户不存在'
                 });
             }
-
+            
             const remainingUsage = await UserStorage.getRemainingUsage(userId);
             const { password: _, ...userWithoutPassword } = user;
-
             res.json({
                 ...userWithoutPassword,
                 remainingUsage
@@ -222,45 +181,166 @@ export class AuthController {
             res.status(500).json({ error: '获取用户信息失败' });
         }
     }
+
+    /**
+     * Passkey 二次校验接口
+     * @param req.body { username: string, passkeyCredentialId: string }
+     */
+    public static async passkeyVerify(req: Request, res: Response) {
+        try {
+            const { username, passkeyCredentialId } = req.body;
+            if (!username || !passkeyCredentialId) {
+                return res.status(400).json({ error: '缺少必要参数' });
+            }
+            
+            // 查找用户并验证
+            const user = await UserStorage.getUserByUsername(username);
+            if (!user) {
+                logger.warn('[AuthController] Passkey校验失败：用户不存在', { username });
+                return res.status(404).json({ error: '用户不存在' });
+            }
+            
+            // 验证用户是否启用了Passkey
+            if (!user.passkeyEnabled || !Array.isArray(user.passkeyCredentials) || user.passkeyCredentials.length === 0) {
+                logger.warn('[AuthController] Passkey校验失败：用户未启用Passkey', { 
+                    username, 
+                    userId: user.id,
+                    passkeyEnabled: user.passkeyEnabled,
+                    credentialsCount: user.passkeyCredentials?.length || 0
+                });
+                return res.status(400).json({ error: '用户未启用Passkey' });
+            }
+            
+            // 验证用户名与用户数据的一致性
+            if (user.username !== username) {
+                logger.error('[AuthController] Passkey校验失败：用户名与用户数据不匹配', {
+                    providedUsername: username,
+                    actualUsername: user.username,
+                    userId: user.id
+                });
+                return res.status(400).json({ error: '用户名验证失败' });
+            }
+            
+            // 校验 passkeyCredentialId 是否存在
+            const found = user.passkeyCredentials.some(
+                cred => cred.credentialID === passkeyCredentialId
+            );
+            if (!found) {
+                logger.warn('[AuthController] Passkey校验失败：找不到匹配的credentialID', {
+                    username,
+                    userId: user.id,
+                    providedCredentialId: passkeyCredentialId,
+                    availableCredentialIds: user.passkeyCredentials.map(c => c.credentialID?.substring(0, 10) + '...')
+                });
+                return res.status(401).json({ error: 'Passkey 校验失败' });
+            }
+            
+            // 更新用户状态（如添加 passkeyVerified 字段）
+            await UserStorage.updateUser(user.id, { passkeyVerified: true });
+            logger.info('[AuthController] Passkey 校验通过，已更新用户状态', { 
+                userId: user.id, 
+                username,
+                credentialId: passkeyCredentialId.substring(0, 10) + '...'
+            });
+            
+            // 生成正式 token（使用用户ID作为token）
+            const token = user.id;
+            await updateUserToken(user.id, token);
+            
+            // 验证token与用户ID的一致性
+            if (token !== user.id) {
+                logger.error('[AuthController] Token生成错误：token与用户ID不匹配', {
+                    username,
+                    userId: user.id,
+                    generatedToken: token
+                });
+                return res.status(500).json({ error: 'Token生成失败' });
+            }
+            
+            const { password: _, ...userWithoutPassword } = user;
+            return res.json({ 
+                success: true, 
+                token, 
+                user: {
+                    id: user.id,
+                    username: user.username,
+                    email: user.email
+                }
+            });
+        } catch (error) {
+            logger.error('[AuthController] Passkey 校验接口异常', { 
+                error: error instanceof Error ? error.message : String(error),
+                username: req.body?.username
+            });
+            return res.status(500).json({ error: '服务器异常' });
+        }
+    }
+
+
 }
 
 // 辅助函数：写入token和过期时间到users.json
-function updateUserToken(userId: string, token: string, expiresInMs = 2 * 60 * 60 * 1000) {
+async function updateUserToken(userId: string, token: string, expiresInMs = 2 * 60 * 60 * 1000) {
     const USERS_FILE = path.join(process.cwd(), 'data', 'users.json');
     if (!fs.existsSync(USERS_FILE)) return;
-    const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
-    const idx = users.findIndex((u: any) => u.id === userId);
-    if (idx !== -1) {
-        users[idx].token = token;
-        users[idx].tokenExpiresAt = Date.now() + expiresInMs;
-        fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+    
+    try {
+        const data = await fs.promises.readFile(USERS_FILE, 'utf-8');
+        const users = JSON.parse(data);
+        const idx = users.findIndex((u: any) => u.id === userId);
+        if (idx !== -1) {
+            users[idx].token = token;
+            users[idx].tokenExpiresAt = Date.now() + expiresInMs;
+            await fs.promises.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        }
+    } catch (error) {
+        logger.error('更新用户token失败:', error);
     }
 }
 
 // 校验token及过期
-export function isAdminToken(token: string | undefined): boolean {
+export async function isAdminToken(token: string | undefined): Promise<boolean> {
     const USERS_FILE = path.join(process.cwd(), 'data', 'users.json');
     if (!fs.existsSync(USERS_FILE)) return false;
-    const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
-    const user = users.find((u: any) => u.role === 'admin' && u.token === token);
-    if (!user) return false;
-    if (!user.tokenExpiresAt || Date.now() > user.tokenExpiresAt) return false;
-    return true;
+    
+    try {
+        const data = await fs.promises.readFile(USERS_FILE, 'utf-8');
+        const users = JSON.parse(data);
+        const user = users.find((u: any) => u.role === 'admin' && u.token === token);
+        if (!user) return false;
+        if (!user.tokenExpiresAt || Date.now() > user.tokenExpiresAt) return false;
+        return true;
+    } catch (error) {
+        logger.error('校验管理员token失败:', error);
+        return false;
+    }
 }
 
 // 登出接口
 export function registerLogoutRoute(app: any) {
-    app.post('/api/auth/logout', (req: Request, res: Response) => {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        const USERS_FILE = path.join(process.cwd(), 'data', 'users.json');
-        if (!fs.existsSync(USERS_FILE)) return res.status(500).json({ error: '用户数据不存在' });
-        const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
-        const idx = users.findIndex((u: any) => u.token === token);
-        if (idx !== -1) {
-            users[idx].token = undefined;
-            users[idx].tokenExpiresAt = undefined;
-            fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+    app.post('/api/auth/logout', async (req: Request, res: Response) => {
+        try {
+            const token = req.headers.authorization?.replace('Bearer ', '');
+            const USERS_FILE = path.join(process.cwd(), 'data', 'users.json');
+            
+            if (!fs.existsSync(USERS_FILE)) {
+                return res.status(500).json({ error: '用户数据不存在' });
+            }
+            
+            const data = await fs.promises.readFile(USERS_FILE, 'utf-8');
+            const users = JSON.parse(data);
+            const idx = users.findIndex((u: any) => u.token === token);
+            
+            if (idx !== -1) {
+                users[idx].token = undefined;
+                users[idx].tokenExpiresAt = undefined;
+                await fs.promises.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+            }
+            
+            res.json({ success: true });
+        } catch (error) {
+            logger.error('登出失败:', error);
+            res.status(500).json({ error: '登出失败' });
         }
-        res.json({ success: true });
     });
 } 

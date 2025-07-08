@@ -95,30 +95,30 @@ export default defineConfig(({ mode }) => ({
   esbuild: {
     sourcemap: false,
     legalComments: 'none',
-    logOverride: { 'this-is-undefined-in-esm': 'silent' }
+    logOverride: { 'this-is-undefined-in-esm': 'silent' },
+    treeShaking: false,
+    minifyIdentifiers: false,
+    minifySyntax: false,
+    minifyWhitespace: false,
+    keepNames: true,
+    target: 'es2020'
   },
   build: {
-    minify: 'terser',
-    terserOptions: {
-      compress: {
-        drop_console: true,
-        drop_debugger: true,
-        pure_funcs: ['console.log', 'console.info', 'console.debug', 'console.warn']
-      },
-      mangle: {
-        safari10: true
-      },
-      format: {
-        comments: false
-      }
-    },
+    minify: false,
     rollupOptions: {
+      treeshake: false,
       output: {
-        manualChunks: {
-          vendor: ['react', 'react-dom', 'react-router-dom'],
-          utils: ['axios', 'framer-motion']
+        manualChunks: mode === 'analyze' ? undefined : {
+          'react-vendor': ['react', 'react-dom'],
+          'router': ['react-router-dom'],
+          'ui': ['@radix-ui/react-dialog', 'lucide-react', 'react-icons'],
+          'utils': ['axios', 'clsx', 'tailwind-merge'],
+          'auth': ['@simplewebauthn/browser', 'qrcode.react'],
+          'animations': ['framer-motion'],
+          'code-highlight': ['react-syntax-highlighter', 'prismjs'],
+          'toast': ['react-toastify'],
+          'swagger': ['swagger-ui-react']
         },
-        // 确保生成的文件名是唯一的
         entryFileNames: 'assets/[name].[hash].js',
         chunkFileNames: 'assets/[name].[hash].js',
         assetFileNames: 'assets/[name].[hash].[ext]'
@@ -130,13 +130,32 @@ export default defineConfig(({ mode }) => ({
         warn(warning);
       }
     },
-    // 启用源码映射，方便调试
     sourcemap: false,
-    // 启用 CSS 代码分割
     cssCodeSplit: true,
-    // 启用资源压缩
     assetsInlineLimit: 4096,
-    // 启用 gzip 压缩
-    reportCompressedSize: true
+    reportCompressedSize: false, // 禁用压缩大小报告以节省内存
+    target: 'esnext',
+    modulePreload: {
+      polyfill: false
+    },
+    chunkSizeWarningLimit: 1000,
+    emptyOutDir: true
+  },
+  optimizeDeps: {
+    include: [
+      'react',
+      'react-dom',
+      'react-router-dom',
+      'axios',
+      'clsx',
+      'tailwind-merge'
+    ],
+    exclude: [
+      'javascript-obfuscator'
+    ],
+    force: false
+  },
+  worker: {
+    format: 'es'
   }
 })) 

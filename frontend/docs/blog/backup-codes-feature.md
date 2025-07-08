@@ -2,6 +2,7 @@
 title: 备用恢复码功能
 date: 2025-06-28
 slug: backup-codes-feature
+tags: [security, totp, backup, feature]
 ---
 
 # 备用恢复码功能

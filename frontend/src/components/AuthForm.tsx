@@ -5,8 +5,12 @@ import DOMPurify from 'dompurify';
 import AlertModal from './AlertModal';
 import TOTPVerification from './TOTPVerification';
 import { usePasskey } from '../hooks/usePasskey';
+import { DebugInfoModal } from './DebugInfoModal';
 import { Dialog } from './ui/Dialog';
 import { Button } from './ui/Button';
+import VerificationMethodSelector from './VerificationMethodSelector';
+import PasskeyVerifyModal from './PasskeyVerifyModal';
+import { useNavigate } from 'react-router-dom';
 
 interface AuthFormProps {
     onSuccess?: () => void;
@@ -19,7 +23,12 @@ interface PasswordStrength {
 
 export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
     const { login, register, pending2FA, setPending2FA, verifyTOTP } = useAuth();
-    const { authenticateWithPasskey } = usePasskey();
+    const { 
+        authenticateWithPasskey, 
+        showDebugModal, 
+        setShowDebugModal, 
+        debugInfos 
+    } = usePasskey();
     const [isLogin, setIsLogin] = useState(true);
     const [username, setUsername] = useState('');
     const [email, setEmail] = useState('');
@@ -35,6 +44,9 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
     const [pendingUserId, setPendingUserId] = useState<string>('');
     const [pendingToken, setPendingToken] = useState<string>('');
     const [showPasskeyVerification, setShowPasskeyVerification] = useState(false);
+    const [showVerificationSelector, setShowVerificationSelector] = useState(false);
+    const [pendingVerificationData, setPendingVerificationData] = useState<any>(null);
+    const navigate = useNavigate();
 
     // 密码复杂度检查
     const checkPasswordStrength = (pwd: string): PasswordStrength => {
@@ -171,11 +183,32 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
             const sanitizedPassword = password;
             if (isLogin) {
                 const result = await login(sanitizedUsername, sanitizedPassword);
-                if (result && result.twoFactorType) {
+                if (result && result.requires2FA && result.twoFactorType) {
                     setPendingUser(result.user);
                     setPendingUserId(result.user.id);
                     setPendingToken(result.token);
-                    setShowTOTPVerification(true);
+                    
+                    // 检查是否同时启用了多种验证方式
+                    const verificationTypes = result.twoFactorType;
+                    const hasPasskey = verificationTypes.includes('Passkey');
+                    const hasTOTP = verificationTypes.includes('TOTP');
+                    
+                    if (hasPasskey && hasTOTP) {
+                        // 同时启用两种验证方式，显示选择弹窗
+                        setPendingVerificationData({
+                            user: result.user,
+                            userId: result.user.id,
+                            token: result.token,
+                            username: sanitizedUsername
+                        });
+                        setShowVerificationSelector(true);
+                    } else if (hasPasskey) {
+                        // 只启用Passkey
+                        setShowPasskeyVerification(true);
+                    } else if (hasTOTP) {
+                        // 只启用TOTP
+                        setShowTOTPVerification(true);
+                    }
                     return;
                 }
             } else {
@@ -194,10 +227,13 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
             }
             onSuccess?.();
         } catch (err: any) {
-            console.error('认证操作失败:', {
+            // 记录认证操作失败（不输出到控制台）
+            const authOperationErrorInfo = {
+                action: '认证操作失败',
                 type: isLogin ? '登录' : '注册',
                 error: err.message,
-            });
+                timestamp: new Date().toISOString()
+            };
             setError(err.message || '操作失败');
         } finally {
             setLoading(false);
@@ -223,28 +259,76 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
 
     useEffect(() => {
         if (pending2FA) {
-            if (pending2FA.type.includes('Passkey')) {
+            if (pending2FA.type.includes('Passkey') && !showPasskeyVerification) {
                 setShowPasskeyVerification(true);
-            } else if (pending2FA.type.includes('TOTP')) {
+            } else if (pending2FA.type.includes('TOTP') && !showTOTPVerification) {
                 setShowTOTPVerification(true);
             }
         }
-    }, [pending2FA]);
+    }, [pending2FA, showPasskeyVerification, showTOTPVerification]);
 
     // Passkey验证弹窗逻辑
     const handlePasskeyVerify = async () => {
         setLoading(true);
         try {
-            const success = await authenticateWithPasskey();
+            // 从 pending2FA 中获取用户名，如果没有则使用当前输入的用户名
+            const currentUsername = pending2FA?.username || username;
+            if (!currentUsername) {
+                setError('无法获取用户名信息');
+                return;
+            }
+            
+            // 记录Passkey验证的用户名来源（不输出到控制台）
+            const usernameSourceInfo = {
+                action: 'Passkey验证用户名来源',
+                pending2FAUsername: pending2FA?.username,
+                currentInputUsername: username,
+                finalUsername: currentUsername,
+                timestamp: new Date().toISOString()
+            };
+            
+            const success = await authenticateWithPasskey(currentUsername);
             if (success) {
                 setShowPasskeyVerification(false);
                 setPending2FA(null);
-                window.location.reload();
+                navigate('/welcome');
             } else {
                 setError('Passkey 验证失败');
             }
         } catch (e: any) {
             setError(e.message || 'Passkey 验证失败');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // 验证方式选择处理
+    const handleVerificationMethodSelect = async (method: 'passkey' | 'totp') => {
+        setShowVerificationSelector(false);
+        setLoading(true);
+        
+        try {
+            if (method === 'passkey') {
+                // 处理Passkey验证
+                const success = await authenticateWithPasskey(pendingVerificationData.username);
+                if (success) {
+                    setPendingVerificationData(null);
+                    navigate('/welcome');
+                } else {
+                    setError('Passkey 验证失败');
+                }
+            } else if (method === 'totp') {
+                // 处理TOTP验证
+                setPending2FA({
+                    userId: pendingVerificationData.userId,
+                    token: pendingVerificationData.token,
+                    username: pendingVerificationData.username,
+                    type: ['TOTP']
+                });
+                setShowTOTPVerification(true);
+            }
+        } catch (e: any) {
+            setError(e.message || '验证失败');
         } finally {
             setLoading(false);
         }
@@ -397,23 +481,13 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
                 message="为了保障您的合法权益，请您在继续使用本服务前，仔细阅读并同意我们的服务条款与隐私政策。未勾选将无法继续注册或登录。"
             />
             
-            {/* Passkey 验证弹窗 */}
-            {showPasskeyVerification && (
-                <Dialog open={showPasskeyVerification} onOpenChange={setShowPasskeyVerification}>
-                    <div className="p-6 flex flex-col items-center">
-                        <h2 className="text-xl font-bold mb-4">Passkey 二次验证</h2>
-                        <p className="mb-6 text-gray-700">请点击下方按钮，使用 Passkey 完成二次验证</p>
-                        <Button
-                            className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2 rounded-lg"
-                            onClick={handlePasskeyVerify}
-                            disabled={loading}
-                        >
-                            {loading ? '验证中...' : '开始 Passkey 验证'}
-                        </Button>
-                        {error && <div className="text-red-500 mt-4">{error}</div>}
-                    </div>
-                </Dialog>
-            )}
+            {/* Passkey 二次校验弹窗 */}
+            <PasskeyVerifyModal
+                open={showPasskeyVerification}
+                username={username}
+                onSuccess={() => { setShowPasskeyVerification(false); setPending2FA(null); navigate('/welcome'); }}
+                onClose={() => setShowPasskeyVerification(false)}
+            />
             {/* TOTP 验证弹窗 */}
             {showTOTPVerification && (
                 <TOTPVerification
@@ -422,11 +496,47 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
                     onSuccess={() => {
                         setShowTOTPVerification(false);
                         setPending2FA(null);
-                        window.location.reload();
+                        navigate('/welcome');
                     }}
                     userId={pending2FA?.userId || ''}
                     token={pending2FA?.token || ''}
                 />
+            )}
+
+            {/* 验证方式选择弹窗 */}
+            {showVerificationSelector && pendingVerificationData && (
+                <VerificationMethodSelector
+                    isOpen={showVerificationSelector}
+                    onClose={() => {
+                        setShowVerificationSelector(false);
+                        setPendingVerificationData(null);
+                    }}
+                    onSelectMethod={handleVerificationMethodSelect}
+                    username={pendingVerificationData.username}
+                    loading={loading}
+                />
+            )}
+
+            {/* 调试信息弹窗 */}
+            <DebugInfoModal
+                isOpen={showDebugModal}
+                onClose={() => setShowDebugModal(false)}
+                debugInfos={debugInfos}
+            />
+
+            {/* 调试信息按钮 */}
+            {debugInfos.length > 0 && (
+                <div className="fixed bottom-4 right-4 z-40">
+                    <button
+                        onClick={() => setShowDebugModal(true)}
+                        className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg shadow-lg transition-colors flex items-center space-x-2"
+                    >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <span>调试信息 ({debugInfos.length})</span>
+                    </button>
+                </div>
             )}
         </div>
     );
