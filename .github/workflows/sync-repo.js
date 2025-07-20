@@ -44,6 +44,8 @@ async function main() {
 
   // 4. 强制 add/commit/push
   const git = simpleGit(LOCAL_REPO);
+  await git.addConfig('user.name', 'Happy-clo');
+  await git.addConfig('user.email', 'happycloo@outlook.com');
   await git.add('.');
   await git.commit('chore: 同步 Happy-TTS 仓库内容（自动同步脚本提交）', {'--allow-empty': null});
   // 设置远程仓库 URL，使用 token 认证
