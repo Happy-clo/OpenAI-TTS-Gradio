@@ -1,0 +1,73 @@
+name: Dependabot Rebase All
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  rebase-all:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Comment @dependabot rebase on all open dependabot PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.USER_PAT }}
+        run: |
+          node <<'EOF'
+          const https = require('https');
+
+          const owner = process.env.GITHUB_REPOSITORY.split('/')[0];
+          const repo = process.env.GITHUB_REPOSITORY.split('/')[1];
+          const token = process.env.GITHUB_TOKEN;
+
+          function githubRequest(path, method = 'GET', data = null) {
+            return new Promise((resolve, reject) => {
+              const options = {
+                hostname: 'api.github.com',
+                path,
+                method,
+                headers: {
+                  'User-Agent': 'actions/rebase-all',
+                  'Authorization': `Bearer ${token}`,
+                  'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                },
+              };
+              const req = https.request(options, res => {
+                let body = '';
+                res.on('data', chunk => body += chunk);
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    resolve(JSON.parse(body));
+                  } else {
+                    reject(new Error(`GitHub API error: ${res.statusCode} ${body}`));
+                  }
+                });
+              });
+              req.on('error', reject);
+              if (data) req.write(JSON.stringify(data));
+              req.end();
+            });
+          }
+
+          (async () => {
+            // 获取所有open PR
+            const prs = await githubRequest(`/repos/${owner}/${repo}/pulls?state=open&per_page=100`);
+            const dependabotPRs = prs.filter(pr => pr.user && pr.user.login === 'dependabot[bot]');
+            for (const pr of dependabotPRs) {
+              await githubRequest(`/repos/${owner}/${repo}/issues/${pr.number}/comments`, 'POST', { body: '@dependabot rebase' });
+              console.log(`Commented on PR #${pr.number}`);
+            }
+          })().catch(e => { console.error(e); process.exit(1); });
+          EOF
