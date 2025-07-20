@@ -49,7 +49,7 @@ async function main() {
   await git.add('.');
   await git.commit('chore: 同步 Happy-TTS 仓库内容（自动同步脚本提交）', {'--allow-empty': null});
   // 设置远程仓库 URL，使用 token 认证
-  const remoteUrl = `https://${GITHUB_TOKEN}@github.com/Happy-clo/OpenAI-TTS-Gradio.git`;
+  const remoteUrl = `https://Happy-clo:${GITHUB_TOKEN}@github.com/Happy-clo/OpenAI-TTS-Gradio.git`;
   await git.remote(['set-url', 'origin', remoteUrl]);
   await git.push(['-f', 'origin', 'main']);
 
