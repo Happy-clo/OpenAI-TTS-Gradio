@@ -26,4 +26,4 @@ jobs:
       - name: 执行同步脚本
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node .github\workflows\sync-repo.js $GITHUB_TOKEN
+        run: node .github/workflows/sync-repo.js $GITHUB_TOKEN
