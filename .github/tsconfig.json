@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "commonjs",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "node",
+    "baseUrl": ".",
+    "paths": {
+      "*": ["src/*"]
+    },
+    "importHelpers": false,
+    "isolatedModules": false,
+    "noEmitOnError": true,
+    "removeComments": false,
+    "sourceMap": false,
+    "declaration": false,
+    "declarationMap": false,
+    "incremental": false,
+    "tsBuildInfoFile": null,
+    "assumeChangesOnlyAffectDirectDependencies": false,
+    "disableSourceOfProjectReferenceRedirect": true,
+    "disableSizeLimit": false,
+    "generateCpuProfile": null,
+    "listEmittedFiles": false,
+    "listFiles": false,
+    "traceResolution": false,
+    "useDefineForClassFields": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "dist-obfuscated", "tests", "**/*.test.ts", "**/*.spec.ts", "scripts/test-totp-url.ts", "scripts/test-totp-url.js"]
+} 
