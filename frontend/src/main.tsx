@@ -7,7 +7,7 @@ import { disableSelection } from './utils/disableSelection'
 
 // 统一危险关键字 - 扩展更多关键词
 const DANGEROUS_KEYWORDS = [
-  'supercopy', 'fatkun', 'downloader', 'ocr', 'scraper', 'capture',
+  'supercopy', 'fatkun', 'downloader', 'capture',
   'copyy', 'copycat', 'copyhelper', 'copyall', 'copytext', 'copycontent', 'copyweb',
   'supercopy', 'supercopyy', 'supercopycat', 'supercopyhelper',
   'fatkun', 'fatkundownloader', 'fatkunbatch', 'fatkunimage',
@@ -18,7 +18,7 @@ const DANGEROUS_KEYWORDS = [
   'tampermonkey', 'greasemonkey', 'violentmonkey', 'userscript',
   'userscripts', 'scriptmonkey',  'grease',
   'violent', 'userjs', 'user.js', 'gm_', 'GM_', 'unsafeWindow',
-  'grant', 'namespace', 'match'
+  'grant', 'namespace'
 ];
 
 // 扩展特定的检测模式
@@ -486,21 +486,21 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // 禁止右键和常见调试快捷键
-// if (typeof window !== 'undefined') {
-//   window.addEventListener('contextmenu', e => e.preventDefault());
-//   window.addEventListener('keydown', e => {
-//     // F12
-//     if (e.key === 'F12') e.preventDefault();
-//     // Ctrl+Shift+I/C/U/J
-//     if ((e.ctrlKey && e.shiftKey && ['I', 'C', 'J'].includes(e.key)) ||
-//       (e.ctrlKey && e.key === 'U')) {
-//       e.preventDefault();
-//     }
-//   });
+if (typeof window !== 'undefined') {
+  window.addEventListener('contextmenu', e => e.preventDefault());
+  window.addEventListener('keydown', e => {
+    // F12
+    if (e.key === 'F12') e.preventDefault();
+    // Ctrl+Shift+I/C/U/J
+    if ((e.ctrlKey && e.shiftKey && ['I', 'C', 'J'].includes(e.key)) ||
+      (e.ctrlKey && e.key === 'U')) {
+      e.preventDefault();
+    }
+  });
 
-//   // 初始化禁用选择功能
-//   disableSelection();
-// }
+  // 初始化禁用选择功能
+  disableSelection();
+}
 
 // 初始化完整性检查
 document.addEventListener('DOMContentLoaded', () => {

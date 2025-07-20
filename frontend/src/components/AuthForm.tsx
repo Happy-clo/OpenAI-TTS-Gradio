@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, startTransition, Suspense } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { Link } from 'react-router-dom';
 import DOMPurify from 'dompurify';
@@ -10,10 +10,12 @@ import { Dialog } from './ui/Dialog';
 import { Button } from './ui/Button';
 import VerificationMethodSelector from './VerificationMethodSelector';
 import PasskeyVerifyModal from './PasskeyVerifyModal';
-import { useNavigate } from 'react-router-dom';
+import api from '../api/index';
+import { useNotification } from './Notification';
+import VerifyCodeInput from './VerifyCodeInput';
+import { AnimatePresence, motion } from 'framer-motion';
 
 interface AuthFormProps {
-    onSuccess?: () => void;
 }
 
 interface PasswordStrength {
@@ -21,7 +23,24 @@ interface PasswordStrength {
     feedback: string;
 }
 
-export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
+// ErrorBoundary 组件
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
+    constructor(props: { children: React.ReactNode }) {
+        super(props);
+        this.state = { hasError: false };
+    }
+    static getDerivedStateFromError(error: any) {
+        return { hasError: true };
+    }
+    render() {
+        if (this.state.hasError) {
+            return <div>加载失败，请重试。</div>;
+        }
+        return this.props.children;
+    }
+}
+
+export const AuthForm: React.FC<AuthFormProps> = () => {
     const { login, register, pending2FA, setPending2FA, verifyTOTP } = useAuth();
     const { 
         authenticateWithPasskey, 
@@ -38,7 +57,6 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
     const [loading, setLoading] = useState(false);
     const [agreed, setAgreed] = useState(false);
     const [passwordStrength, setPasswordStrength] = useState<PasswordStrength>({ score: 0, feedback: '' });
-    const [showAlert, setShowAlert] = useState(false);
     const [showTOTPVerification, setShowTOTPVerification] = useState(false);
     const [pendingUser, setPendingUser] = useState<any>(null);
     const [pendingUserId, setPendingUserId] = useState<string>('');
@@ -46,7 +64,21 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
     const [showPasskeyVerification, setShowPasskeyVerification] = useState(false);
     const [showVerificationSelector, setShowVerificationSelector] = useState(false);
     const [pendingVerificationData, setPendingVerificationData] = useState<any>(null);
-    const navigate = useNavigate();
+    const [showEmailVerify, setShowEmailVerify] = useState(false);
+    const [pendingEmail, setPendingEmail] = useState('');
+    const [verifyCode, setVerifyCode] = useState('');
+    const [verifyError, setVerifyError] = useState('');
+    const [verifyLoading, setVerifyLoading] = useState(false);
+    const { setNotification } = useNotification();
+
+    // 支持的主流邮箱后缀
+    const allowedDomains = [
+      'gmail.com', 'outlook.com', 'qq.com', '163.com', '126.com',
+      'hotmail.com', 'yahoo.com', 'icloud.com', 'foxmail.com'
+    ];
+    const emailPattern = new RegExp(
+      `^[\\w.-]+@(${allowedDomains.map(d => d.replace('.', '\\.')).join('|')})$`
+    );
 
     // 密码复杂度检查
     const checkPasswordStrength = (pwd: string): PasswordStrength => {
@@ -123,9 +155,9 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
                 }
                 break;
             case 'email':
-                // 邮箱格式验证
-                if (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(sanitizedValue)) {
-                    return '请输入有效的邮箱地址';
+                // 邮箱格式验证（只允许主流邮箱）
+                if (!emailPattern.test(sanitizedValue)) {
+                    return '只支持主流邮箱（如gmail、outlook、qq、163、126、hotmail、yahoo、icloud、foxmail等）';
                 }
                 break;
             case 'password':
@@ -170,7 +202,7 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
         }
 
         if (!agreed) {
-            setShowAlert(true);
+            setNotification({ message: '请勾选服务条款与隐私政策', type: 'warning' });
             return;
         }
 
@@ -195,37 +227,50 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
                     
                     if (hasPasskey && hasTOTP) {
                         // 同时启用两种验证方式，显示选择弹窗
+                        // 注意：不设置 pending2FA，避免自动弹出验证弹窗
                         setPendingVerificationData({
                             user: result.user,
                             userId: result.user.id,
                             token: result.token,
                             username: sanitizedUsername
                         });
-                        setShowVerificationSelector(true);
+                        startTransition(() => setShowVerificationSelector(true));
                     } else if (hasPasskey) {
-                        // 只启用Passkey
-                        setShowPasskeyVerification(true);
+                        // 只启用Passkey，直接显示Passkey验证弹窗
+                        setPending2FA({
+                            userId: result.user.id,
+                            token: result.token,
+                            username: sanitizedUsername,
+                            type: ['Passkey']
+                        });
+                        startTransition(() => setShowPasskeyVerification(true));
                     } else if (hasTOTP) {
-                        // 只启用TOTP
-                        setShowTOTPVerification(true);
+                        // 只启用TOTP，直接显示TOTP验证弹窗
+                        setPending2FA({
+                            userId: result.user.id,
+                            token: result.token,
+                            username: sanitizedUsername,
+                            type: ['TOTP']
+                        });
+                        startTransition(() => setShowTOTPVerification(true));
                     }
                     return;
                 }
             } else {
-                // 注册后自动登录
-                await register(sanitizedUsername, sanitizedEmail, sanitizedPassword);
-                // 注册成功后自动登录
-                const loginResult = await login(sanitizedUsername, sanitizedPassword);
-                if (loginResult && loginResult.token) {
-                    if (typeof loginResult.token === 'string' && loginResult.token.length > 20) {
-                        localStorage.setItem('token', loginResult.token);
-                    } else {
-                        alert('登录失败，服务器返回无效token，请联系管理员');
-                        return;
-                    }
+                // 注册后进入邮箱验证码界面
+                const res = await api.post('/api/auth/register', {
+                    username: sanitizedUsername,
+                    email: sanitizedEmail,
+                    password: sanitizedPassword
+                });
+                if (res.data && res.data.needVerify) {
+                    setShowEmailVerify(true);
+                    setPendingEmail(sanitizedEmail);
+                } else {
+                    setError('注册失败，未收到验证码发送指示');
                 }
             }
-            onSuccess?.();
+            // 登录成功后强制刷新页面，不需要回调函数
         } catch (err: any) {
             // 记录认证操作失败（不输出到控制台）
             const authOperationErrorInfo = {
@@ -240,11 +285,14 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
         }
     };
 
+    // 切换登录/注册模式
     const handleModeSwitch = () => {
-        setIsLogin(!isLogin);
-        setError(null);
-        setPassword('');
-        setConfirmPassword('');
+        startTransition(() => {
+            setIsLogin(!isLogin);
+            setError(null);
+            setPassword('');
+            setConfirmPassword('');
+        });
     };
 
     // 实时密码强度检查
@@ -257,15 +305,17 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
         }
     }, [password, username]);
 
+    // 修改useEffect逻辑，避免在显示验证方式选择器时自动弹出验证弹窗
     useEffect(() => {
-        if (pending2FA) {
-            if (pending2FA.type.includes('Passkey') && !showPasskeyVerification) {
-                setShowPasskeyVerification(true);
-            } else if (pending2FA.type.includes('TOTP') && !showTOTPVerification) {
-                setShowTOTPVerification(true);
+        // 只有在不显示验证方式选择器时才自动弹出验证弹窗
+        if (!showVerificationSelector && pending2FA && Array.isArray(pending2FA.type) && pending2FA.type.length === 1) {
+            if (pending2FA.type[0] === 'Passkey' && !showPasskeyVerification) {
+                startTransition(() => setShowPasskeyVerification(true));
+            } else if (pending2FA.type[0] === 'TOTP' && !showTOTPVerification) {
+                startTransition(() => setShowTOTPVerification(true));
             }
         }
-    }, [pending2FA, showPasskeyVerification, showTOTPVerification]);
+    }, [pending2FA, showPasskeyVerification, showTOTPVerification, showVerificationSelector]);
 
     // Passkey验证弹窗逻辑
     const handlePasskeyVerify = async () => {
@@ -289,9 +339,14 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
             
             const success = await authenticateWithPasskey(currentUsername);
             if (success) {
-                setShowPasskeyVerification(false);
-                setPending2FA(null);
-                navigate('/welcome');
+                startTransition(() => {
+                    setShowPasskeyVerification(false);
+                    setPending2FA(null);
+                    // 认证成功后刷新页面
+                    if (typeof window !== 'undefined') {
+                        window.location.reload();
+                    }
+                });
             } else {
                 setError('Passkey 验证失败');
             }
@@ -304,33 +359,75 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
 
     // 验证方式选择处理
     const handleVerificationMethodSelect = async (method: 'passkey' | 'totp') => {
-        setShowVerificationSelector(false);
+        startTransition(() => setShowVerificationSelector(false));
         setLoading(true);
         
         try {
             if (method === 'passkey') {
-                // 处理Passkey验证
+                // 处理Passkey验证 - 直接调用验证，不设置pending2FA
                 const success = await authenticateWithPasskey(pendingVerificationData.username);
                 if (success) {
-                    setPendingVerificationData(null);
-                    navigate('/welcome');
+                    startTransition(() => {
+                        setPendingVerificationData(null);
+                        // 认证成功后刷新页面
+                        if (typeof window !== 'undefined') {
+                            window.location.reload();
+                        }
+                    });
                 } else {
                     setError('Passkey 验证失败');
                 }
             } else if (method === 'totp') {
-                // 处理TOTP验证
-                setPending2FA({
-                    userId: pendingVerificationData.userId,
-                    token: pendingVerificationData.token,
-                    username: pendingVerificationData.username,
-                    type: ['TOTP']
+                // 选择TOTP验证方式，设置pending2FA并显示TOTP验证弹窗
+                startTransition(() => {
+                    setPending2FA({
+                        userId: pendingVerificationData.userId,
+                        token: pendingVerificationData.token,
+                        username: pendingVerificationData.username,
+                        type: ['TOTP']
+                    });
+                    setShowTOTPVerification(true);
                 });
-                setShowTOTPVerification(true);
             }
         } catch (e: any) {
             setError(e.message || '验证失败');
         } finally {
             setLoading(false);
+        }
+    };
+
+    // 验证方式选择器关闭处理
+    const handleVerificationSelectorClose = () => {
+        startTransition(() => {
+            setShowVerificationSelector(false);
+            setPendingVerificationData(null);
+            setPending2FA(null); // 清除pending2FA状态，防止其他弹窗自动显示
+        });
+    };
+
+    const handleVerifyCode = async (code?: string) => {
+        setVerifyLoading(true);
+        setVerifyError('');
+        try {
+            const res = await api.post('/api/auth/verify-email', {
+                email: pendingEmail,
+                code: code || verifyCode
+            });
+            if (res.data && res.data.success) {
+                setShowEmailVerify(false);
+                setPendingEmail('');
+                setVerifyCode('');
+                setVerifyError('');
+                // 邮箱验证通过后允许登录
+                setIsLogin(true);
+                setError('邮箱验证成功，请登录');
+            } else {
+                setVerifyError(res.data.error || '验证码错误');
+            }
+        } catch (err: any) {
+            setVerifyError(err.response?.data?.error || err.message || '验证码校验失败');
+        } finally {
+            setVerifyLoading(false);
         }
     };
 
@@ -474,43 +571,61 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
                     </div>
                 </form>
             </div>
-            <AlertModal
-                open={showAlert}
-                onClose={() => setShowAlert(false)}
-                title="请勾选服务条款与隐私政策"
-                message="为了保障您的合法权益，请您在继续使用本服务前，仔细阅读并同意我们的服务条款与隐私政策。未勾选将无法继续注册或登录。"
-            />
+            {/* 服务条款与隐私政策弹窗已用 setNotification 全局弹窗替换 */}
             
             {/* Passkey 二次校验弹窗 */}
             <PasskeyVerifyModal
                 open={showPasskeyVerification}
                 username={username}
-                onSuccess={() => { setShowPasskeyVerification(false); setPending2FA(null); navigate('/welcome'); }}
-                onClose={() => setShowPasskeyVerification(false)}
+                onSuccess={() => { 
+                    startTransition(() => { 
+                        setShowPasskeyVerification(false); 
+                        setPending2FA(null); 
+                        setPendingVerificationData(null);
+                        // 认证成功后刷新页面
+                        if (typeof window !== 'undefined') {
+                            window.location.reload(); 
+                        }
+                    }); 
+                }}
+                onClose={() => startTransition(() => {
+                    setShowPasskeyVerification(false);
+                    setPending2FA(null);
+                    setPendingVerificationData(null);
+                })}
             />
             {/* TOTP 验证弹窗 */}
             {showTOTPVerification && (
-                <TOTPVerification
-                    isOpen={showTOTPVerification}
-                    onClose={() => setShowTOTPVerification(false)}
-                    onSuccess={() => {
-                        setShowTOTPVerification(false);
-                        setPending2FA(null);
-                        navigate('/welcome');
-                    }}
-                    userId={pending2FA?.userId || ''}
-                    token={pending2FA?.token || ''}
-                />
+                <ErrorBoundary>
+                    <TOTPVerification
+                        isOpen={showTOTPVerification}
+                        onClose={() => startTransition(() => {
+                            setShowTOTPVerification(false);
+                            setPending2FA(null);
+                            setPendingVerificationData(null);
+                        })}
+                        onSuccess={() => {
+                            startTransition(() => {
+                                setShowTOTPVerification(false);
+                                setPending2FA(null);
+                                setPendingVerificationData(null);
+                                // 认证成功后刷新页面
+                                if (typeof window !== 'undefined') {
+                                    window.location.reload();
+                                }
+                            });
+                        }}
+                        userId={pending2FA?.userId || ''}
+                        token={pending2FA?.token || ''}
+                    />
+                </ErrorBoundary>
             )}
 
             {/* 验证方式选择弹窗 */}
             {showVerificationSelector && pendingVerificationData && (
                 <VerificationMethodSelector
                     isOpen={showVerificationSelector}
-                    onClose={() => {
-                        setShowVerificationSelector(false);
-                        setPendingVerificationData(null);
-                    }}
+                    onClose={handleVerificationSelectorClose}
                     onSelectMethod={handleVerificationMethodSelect}
                     username={pendingVerificationData.username}
                     loading={loading}
@@ -520,7 +635,7 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
             {/* 调试信息弹窗 */}
             <DebugInfoModal
                 isOpen={showDebugModal}
-                onClose={() => setShowDebugModal(false)}
+                onClose={() => startTransition(() => setShowDebugModal(false))}
                 debugInfos={debugInfos}
             />
 
@@ -538,6 +653,57 @@ export const AuthForm: React.FC<AuthFormProps> = ({ onSuccess }) => {
                     </button>
                 </div>
             )}
+
+            {/* 邮箱验证码弹窗 */}
+            <AnimatePresence>
+            {showEmailVerify && (
+                <motion.div
+                    className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-30 z-50"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.25 }}
+                >
+                    <motion.div
+                        className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm relative"
+                        initial={{ scale: 0.95, opacity: 0, y: 40 }}
+                        animate={{ scale: 1, opacity: 1, y: 0 }}
+                        exit={{ scale: 0.95, opacity: 0, y: 40 }}
+                        transition={{ duration: 0.28 }}
+                    >
+                        <h3 className="text-lg font-bold mb-4 text-center">邮箱验证</h3>
+                        <p className="mb-2 text-gray-600 text-center">我们已向 <span className="font-semibold">{pendingEmail}</span> 发送了验证码，请输入收到的验证码完成注册。</p>
+                        <VerifyCodeInput
+                            length={8}
+                            inputClassName="bg-blue-50 focus:bg-blue-100 border-blue-200 text-blue-900" // 新增：淡蓝色背景
+                            onComplete={async (code) => {
+                                setVerifyCode(code);
+                                // 自动触发验证
+                                if (code.length === 8 && !verifyLoading) {
+                                    await handleVerifyCode(code);
+                                }
+                            }}
+                            loading={verifyLoading}
+                            error={verifyError}
+                        />
+                        <button
+                            className="w-full py-2 px-4 bg-indigo-600 text-white rounded-md font-semibold hover:bg-indigo-700 transition-all mb-2 mt-2"
+                            onClick={() => handleVerifyCode()}
+                            disabled={verifyLoading || verifyCode.length !== 8}
+                        >
+                            {verifyLoading ? '验证中...' : '提交验证'}
+                        </button>
+                        <button
+                            className="w-full py-2 px-4 bg-gray-200 text-gray-700 rounded-md font-semibold hover:bg-gray-300 transition-all"
+                            onClick={() => setShowEmailVerify(false)}
+                            disabled={verifyLoading}
+                        >
+                            取消
+                        </button>
+                    </motion.div>
+                </motion.div>
+            )}
+            </AnimatePresence>
         </div>
     );
 };

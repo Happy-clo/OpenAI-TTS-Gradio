@@ -24,7 +24,6 @@
     "cheerio-select": "^1.6.0",
     "clsx": "^2.0.0",
     "css-select": "^1.3.0-rc0",
-    "docs": "file:",
     "mitt": "^3.0.1",
     "prism-react-renderer": "^2.3.0",
     "react": "^19.0.0",

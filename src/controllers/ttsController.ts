@@ -6,6 +6,8 @@ import logger from '../utils/logger';
 import { config } from '../config/config';
 import axios from 'axios';
 import { ContentFilterService } from '../services/contentFilterService';
+import { CloudflareTurnstileService } from '../services/cloudflareTurnstileService';
+import { findDuplicateGeneration, addGenerationRecord, isAdminUser } from '../services/userGenerationService';
 
 export class TtsController {
     private static ttsService = new TtsService();
@@ -32,7 +34,7 @@ export class TtsController {
 
     public static async generateSpeech(req: Request, res: Response) {
         try {
-            const { text, model, voice, output_format, speed, fingerprint, generationCode } = req.body;
+            const { text, model, voice, output_format, speed, fingerprint, generationCode, cfToken } = req.body;
             const ip = TtsController.getClientIp(req);
             const userId = req.headers['x-user-id'] as string;
 
@@ -99,6 +101,21 @@ export class TtsController {
                 });
             }
 
+            // 验证 Cloudflare Turnstile
+            if (CloudflareTurnstileService.isEnabled()) {
+                const cfVerified = await CloudflareTurnstileService.verifyToken(cfToken, ip);
+                if (!cfVerified) {
+                    logger.warn('Cloudflare Turnstile 验证失败', {
+                        ip,
+                        userAgent: req.headers['user-agent'],
+                        timestamp: new Date().toISOString()
+                    });
+                    return res.status(403).json({
+                        error: '人机验证失败，请重新验证'
+                    });
+                }
+            }
+
             // 检查文本长度
             if (text.length > 4096) {
                 return res.status(400).json({
@@ -139,6 +156,26 @@ export class TtsController {
                 }
             }
 
+            // MongoDB 用户生成内容查重与存储
+            let isAdmin = false;
+            if (userId) {
+                isAdmin = !!(await isAdminUser(userId));
+            }
+            if (userId && !isAdmin) {
+                // 生成内容哈希
+                const contentHash = require('../services/ttsService').TtsService.prototype.generateContentHash(text, voice, model);
+                const duplicate = await findDuplicateGeneration({ userId, text, voice, model, contentHash });
+                if (duplicate && duplicate.fileName) {
+                    return res.json({
+                        success: true,
+                        isDuplicate: true,
+                        fileName: duplicate.fileName,
+                        audioUrl: `${process.env.VITE_API_URL || process.env.BASE_URL || 'https://tts-api.hapxs.com'}/static/audio/${duplicate.fileName}`,
+                        message: '检测到重复内容，已返回已有音频。请注意：重复提交相同内容可能导致账号被封禁。'
+                    });
+                }
+            }
+
             // 生成语音
             try {
                 const result = await TtsController.ttsService.generateSpeech({
@@ -148,6 +185,21 @@ export class TtsController {
                     output_format,
                     speed
                 });
+
+                // 生成成功后存储到 MongoDB
+                if (userId && !isAdmin) {
+                    const contentHash = require('../services/ttsService').TtsService.prototype.generateContentHash(text, voice, model);
+                    await addGenerationRecord({
+                        userId,
+                        text,
+                        voice,
+                        model,
+                        outputFormat: output_format,
+                        speed,
+                        fileName: result.fileName,
+                        contentHash
+                    });
+                }
 
                 // 记录生成历史
                 await StorageManager.addRecord(ip, fingerprint || 'unknown', text, result.fileName);
@@ -166,7 +218,7 @@ export class TtsController {
                 // 以 audioUrl 作为签名内容
                 const signature = signContent(result.audioUrl);
 
-                res.json({ ...result, signature });
+                res.json({ success: true, ...result, signature });
             } catch (error) {
                 logger.error('生成语音失败:', error);
                 res.status(500).json({ error: '生成语音失败' });

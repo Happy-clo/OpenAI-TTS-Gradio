@@ -10,7 +10,6 @@ frontend/dist/
 build/
 out/
 .next/
-n.json
 .nuxt/
 openapi.json
 generation_records.json
