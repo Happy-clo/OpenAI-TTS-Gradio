@@ -41,8 +41,13 @@ import dataProcessRoutes from './routes/dataProcessRoutes';
 import mediaRoutes from './routes/mediaRoutes';
 import socialRoutes from './routes/socialRoutes';
 import lifeRoutes from './routes/lifeRoutes';
-import lotteryRoutes from './routes/lotteryRoutes';
 import { PasskeyDataRepairService } from './services/passkeyDataRepairService';
+import miniapiRoutes from './routes/miniapiRoutes';
+import lotteryRoutes from './routes/lotteryRoutes';
+import { connectMongo } from './services/mongoService';
+import modlistRoutes from './routes/modlistRoutes';
+
+import emailRoutes from './routes/emailRoutes';
 
 // 扩展 Request 类型
 declare global {
@@ -52,6 +57,16 @@ declare global {
         }
     }
 }
+
+// 邮件服务全局开关
+// eslint-disable-next-line no-var
+var EMAIL_ENABLED: boolean;
+// 邮件服务状态全局变量
+// eslint-disable-next-line no-var
+var EMAIL_SERVICE_STATUS: { available: boolean; error?: string };
+// 对外邮件服务状态全局变量
+// eslint-disable-next-line no-var
+var OUTEMAIL_SERVICE_STATUS: { available: boolean; error?: string };
 
 const app = express();
 const execAsync = promisify(exec);
@@ -257,13 +272,17 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(isLocalIp); // 添加本地 IP 检查中间件
 
+// 立即注册 emailRoutes，确保 /api/email/outemail 无需 token 验证
+app.use('/api/email', emailRoutes);
+
 // 应用请求限制到不同路由
-app.use('/api/tts/generate', ttsLimiter);
 app.use('/api/auth', authLimiter);
 app.use('/api/auth/me', meEndpointLimiter); // 为 /me 端点添加特殊的限流器
+app.use('/api/tts/generate', ttsLimiter);
 app.use('/api/tts/history', historyLimiter);
 
-// 注册路由
+
+// 注册路由（路由内部已有速率限制）
 app.use('/api/tts', ttsRoutes);
 
 // TOTP路由限流器
@@ -474,6 +493,17 @@ const lifeLimiter = rateLimit({
     }
 });
 
+// MiniAPI路由限流器
+const miniapiLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1分钟
+    max: 30, // 限制每个IP每分钟30次MiniAPI请求
+    message: { error: 'MiniAPI请求过于频繁，请稍后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+    skip: (req: Request): boolean => req.isLocalIp || false
+});
+
 // 状态路由限流器
 const statusLimiter = rateLimit({
     windowMs: 60 * 1000, // 1分钟
@@ -489,7 +519,6 @@ const statusLimiter = rateLimit({
         return req.isLocalIp || false;
     }
 });
-
 app.use('/api/totp', totpLimiter);
 app.use('/api/passkey', passkeyLimiter);
 app.use('/api/tamper', tamperLimiter);
@@ -599,13 +628,16 @@ app.use('/api/data-collection', dataCollectionRoutes);
 app.use('/api/ipfs', ipfsRoutes);
 app.use('/api/network', networkRoutes);
 app.use('/api/data', dataProcessRoutes);
+app.use('/api/lottery', lotteryRoutes);
 app.use('/api/media', mediaRoutes);
 app.use('/api/social', socialRoutes);
 app.use('/api/life', lifeRoutes);
-app.use('/api/lottery', lotteryRoutes);
 app.use('/api', logRoutes);
 app.use('/api/passkey', passkeyAutoFixMiddleware);
 app.use('/api/passkey', passkeyRoutes);
+app.use('/api/email', emailRoutes);
+app.use('/api/miniapi', miniapiLimiter, miniapiRoutes);
+app.use('/api/modlist', modlistRoutes);
 
 // 完整性检测相关兜底接口限速
 const integrityLimiter = rateLimit({
@@ -653,10 +685,23 @@ const ipQueryLimiter = rateLimit({
 app.get('/ip', ipQueryLimiter, async (req, res) => {
   try {
     const ip = (req.headers['x-real-ip'] as string) || req.ip || '127.0.0.1';
+    logger.info('收到IP信息查询请求', { ip, userAgent: req.headers['user-agent'] });
+    
     const ipInfo = await getIPInfo(ip);
+    logger.info('IP信息查询成功', { ip, ipInfo });
     res.json(ipInfo);
   } catch (error) {
-    res.status(500).json({ error: '获取IP信息失败' });
+    logger.error('IP信息查询失败', { 
+      ip: (req.headers['x-real-ip'] as string) || req.ip || '127.0.0.1',
+      error: error instanceof Error ? error.message : String(error)
+    });
+    
+    // 确保返回JSON格式的错误响应
+    res.status(500).json({ 
+      error: '获取IP信息失败',
+      ip: (req.headers['x-real-ip'] as string) || req.ip || '127.0.0.1',
+      message: error instanceof Error ? error.message : '未知错误'
+    });
   }
 });
 
@@ -1005,6 +1050,88 @@ const ensureDirectories = async () => {
 // 注册登出接口
 registerLogoutRoute(app);
 
+// 检查邮件API密钥
+if (!process.env.RESEND_API_KEY) {
+  (globalThis as any).EMAIL_ENABLED = false;
+  (globalThis as any).EMAIL_SERVICE_STATUS = { available: false, error: '未配置 RESEND_API_KEY' };
+  (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: false, error: '未配置 RESEND_API_KEY' };
+  console.warn('[邮件服务] 未检测到 RESEND_API_KEY，邮件发送功能已禁用');
+} else {
+  (globalThis as any).EMAIL_ENABLED = true;
+  // 启动时检查邮件服务状态
+  (async () => {
+    try {
+      const { EmailService } = require('./services/emailService');
+      const status = await EmailService.getServiceStatus();
+      (globalThis as any).EMAIL_SERVICE_STATUS = status;
+      if (status.available) {
+        console.log('[邮件服务] 服务状态检查完成：正常');
+      } else {
+        console.warn('[邮件服务] 服务状态检查完成：异常', status.error);
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '未知错误';
+      (globalThis as any).EMAIL_SERVICE_STATUS = { available: false, error: errorMessage };
+      console.warn('[邮件服务] 服务状态检查失败：', errorMessage);
+    }
+  })();
+  
+  // 启动时检查对外邮件服务状态
+  (async () => {
+    try {
+      const { sendOutEmail } = require('./services/outEmailService');
+      const config = require('./config').default;
+      
+      // 检查对外邮件服务配置
+      if (!config.email.outemail.enabled) {
+        (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: false, error: '对外邮件服务未启用' };
+        console.warn('[对外邮件服务] 服务未启用');
+        return;
+      }
+      
+      if (!config.email.outemail.domain || !config.email.outemail.apiKey) {
+        (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: false, error: '对外邮件服务配置不完整' };
+        console.warn('[对外邮件服务] 配置不完整');
+        return;
+      }
+      
+      // 尝试创建Resend实例来检查API密钥有效性
+      const { Resend } = require('resend');
+      const resend = new Resend(config.email.outemail.apiKey);
+      
+      // 发送测试请求检查API连接
+      const testResult = await resend.emails.send({
+        from: 'test@example.com',
+        to: ['test@example.com'],
+        subject: 'Test',
+        html: '<p>Test</p>'
+      });
+      
+      if (testResult.error) {
+        const error = testResult.error as any;
+        if (error.statusCode === 400) {
+          // 400错误通常是参数问题，说明API连接正常
+          (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: true };
+          console.log('[对外邮件服务] 服务状态检查完成：正常');
+        } else if (error.statusCode === 401 || error.statusCode === 403) {
+          (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: false, error: 'API密钥无效' };
+          console.warn('[对外邮件服务] 服务状态检查完成：API密钥无效');
+        } else {
+          (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: false, error: error.message };
+          console.warn('[对外邮件服务] 服务状态检查完成：异常', error.message);
+        }
+      } else {
+        (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: true };
+        console.log('[对外邮件服务] 服务状态检查完成：正常');
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '未知错误';
+      (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: false, error: errorMessage };
+      console.warn('[对外邮件服务] 服务状态检查失败：', errorMessage);
+    }
+  })();
+}
+
 // Start server (only in non-test environment)
 if (process.env.NODE_ENV !== 'test') {
   const PORT = config.port;
@@ -1016,21 +1143,110 @@ if (process.env.NODE_ENV !== 'test') {
     
     // 启动时检查文件权限
     try {
-      const { checkFilePermissions } = require('../scripts/check-file-permissions.js');
-      checkFilePermissions();
+      // 尝试多个可能的路径
+      let checkFilePermissions;
+      const possiblePaths = [
+        '../scripts/check-file-permissions.js',
+        '../../scripts/check-file-permissions.js',
+        './scripts/check-file-permissions.js',
+        path.join(process.cwd(), 'scripts', 'check-file-permissions.js')
+      ];
+      
+      for (const scriptPath of possiblePaths) {
+        try {
+          const scriptModule = require(scriptPath);
+          checkFilePermissions = scriptModule.checkFilePermissions;
+          if (checkFilePermissions) {
+            logger.info(`[启动] 找到文件权限检查脚本: ${scriptPath}`);
+            break;
+          }
+        } catch (e) {
+          // 继续尝试下一个路径
+        }
+      }
+      
+      if (checkFilePermissions) {
+        checkFilePermissions();
+      } else {
+        logger.warn('[启动] 未找到文件权限检查脚本，跳过检查');
+      }
     } catch (error) {
       logger.warn('[启动] 文件权限检查失败，继续启动', { 
         error: error instanceof Error ? error.message : String(error) 
       });
     }
     
-    // 启动时自动修复Passkey数据
+    // 启动时检查存储模式并初始化数据库
     try {
+      logger.info('[启动] 检查用户存储模式...');
+      const storageMode = process.env.USER_STORAGE_MODE || 'file';
+      logger.info(`[启动] 当前存储模式: ${storageMode}`);
+      
+      // 检查存储模式是否可用并初始化数据库
+      if (storageMode === 'mongo') {
+        try {
+          // 尝试连接 MongoDB
+          const { connectMongo } = require('./services/mongoService');
+          await connectMongo();
+          logger.info('[启动] MongoDB 连接成功');
+          
+          // 初始化 MongoDB 数据库
+          const { UserStorage } = require('./utils/userStorage');
+          const initResult = await UserStorage.initializeDatabase();
+          if (initResult.initialized) {
+            logger.info(`[启动] ${initResult.message}`);
+          } else {
+            logger.error(`[启动] MongoDB 初始化失败: ${initResult.message}`);
+          }
+        } catch (error) {
+          logger.warn('[启动] MongoDB 连接失败，建议切换到文件模式', { 
+            error: error instanceof Error ? error.message : String(error) 
+          });
+        }
+      } else if (storageMode === 'mysql') {
+        try {
+          // 尝试连接 MySQL
+          const { getMysqlConnection } = require('./utils/userStorage');
+          const conn = await getMysqlConnection();
+          await conn.execute('SELECT 1');
+          await conn.end();
+          logger.info('[启动] MySQL 连接成功');
+          
+          // 初始化 MySQL 数据库
+          const { UserStorage } = require('./utils/userStorage');
+          const initResult = await UserStorage.initializeDatabase();
+          if (initResult.initialized) {
+            logger.info(`[启动] ${initResult.message}`);
+          } else {
+            logger.error(`[启动] MySQL 初始化失败: ${initResult.message}`);
+          }
+        } catch (error) {
+          logger.warn('[启动] MySQL 连接失败，建议切换到文件模式', { 
+            error: error instanceof Error ? error.message : String(error) 
+          });
+        }
+      } else {
+        // 文件存储模式初始化
+        try {
+          const { UserStorage } = require('./utils/userStorage');
+          const initResult = await UserStorage.initializeDatabase();
+          if (initResult.initialized) {
+            logger.info(`[启动] ${initResult.message}`);
+          } else {
+            logger.error(`[启动] 文件存储初始化失败: ${initResult.message}`);
+          }
+        } catch (error) {
+          logger.error('[启动] 文件存储初始化失败', { 
+            error: error instanceof Error ? error.message : String(error) 
+          });
+        }
+      }
+      
       logger.info('[启动] 开始自动修复Passkey数据...');
       await PasskeyDataRepairService.repairAllUsersPasskeyData();
       logger.info('[启动] Passkey数据自动修复完成');
     } catch (error) {
-      logger.error('[启动] Passkey数据自动修复失败', { 
+      logger.error('[启动] 数据库初始化和Passkey数据修复失败', { 
         error: error instanceof Error ? error.message : String(error) 
       });
       // 不阻止服务器启动，只记录错误

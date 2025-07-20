@@ -12,6 +12,15 @@ interface Config {
   server: {
     password: string;
   };
+  email: {
+    code: string;
+    outemail: {
+      enabled: boolean;
+      domain: string;
+      apiKey: string;
+      code: string;
+    };
+  };
   paths: {
     ipData: string;
     lcData: string;
@@ -38,6 +47,15 @@ const config: Config = {
   server: {
     password: process.env.SERVER_PASSWORD || 'admin',
   },
+  email: {
+    code: process.env.EMAIL_CODE || '',
+    outemail: {
+      enabled: (process.env.OUTEMAIL_ENABLED || process.env.VITE_OUTEMAIL_ENABLED || process.env.RESEND_OUTEMAIL_ENABLED) === 'true',
+      domain: process.env.OUTEMAIL_DOMAIN || process.env.RESEND_DOMAIN_OUT || process.env.RESEND_DOMAIN || '',
+      apiKey: process.env.OUTEMAIL_API_KEY || process.env.RESEND_API_OUT || process.env.RESEND_API_KEY || '',
+      code: process.env.OUTEMAIL_CODE || '',
+    },
+  },
   paths: {
     ipData: join(__dirname, '../data/ip_data.json'),
     lcData: join(__dirname, '../data/lc_data.json'),
@@ -54,5 +72,8 @@ const config: Config = {
     whitelist: (process.env.IP_WHITELIST || '').split(',').filter(Boolean),
   },
 };
+
+// 默认关闭人机验证，只有明确设置为 'true' 时才启用
+export const enableTurnstile = process.env.VITE_ENABLE_TURNSTILE === 'true';
 
 export default config; 

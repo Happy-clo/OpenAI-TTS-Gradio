@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 import { validateTOTPToken, validateBackupCode, cleanTOTPToken, cleanBackupCode } from '../utils/totpUtils';
-import { Input } from './ui';
-import { useNavigate } from 'react-router-dom';
+import { Input } from './ui/Input';
 
 interface TOTPVerificationProps {
   isOpen: boolean;
@@ -25,7 +24,6 @@ const TOTPVerification: React.FC<TOTPVerificationProps> = ({
   const [useBackupCode, setUseBackupCode] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const navigate = useNavigate();
 
   // 获取API基础URL
   const getApiBaseUrl = () => {
@@ -75,9 +73,11 @@ const TOTPVerification: React.FC<TOTPVerificationProps> = ({
       });
 
       if (response.data.verified) {
-        // TOTP验证成功，清理状态并刷新页面
-        localStorage.setItem('token', token);
-        navigate('/welcome');
+        // TOTP验证成功，保存JWT token并调用成功回调
+        if (response.data.token) {
+          localStorage.setItem('token', response.data.token);
+        }
+        onSuccess();
       } else {
         throw new Error('TOTP验证失败');
       }
@@ -158,7 +158,7 @@ const TOTPVerification: React.FC<TOTPVerificationProps> = ({
                   </motion.svg>
                 </div>
                 <h2 className="text-2xl font-bold text-gray-900 mb-2">二次验证</h2>
-                <p className="text-gray-600">请输入验证码完成登录</p>
+                <div className="text-gray-600">请输入验证码完成登录</div>
               </div>
             </motion.div>
 

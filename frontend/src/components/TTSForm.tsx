@@ -3,8 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useTts } from '../hooks/useTts';
 import { TtsRequest, TtsResponse } from '../types/tts';
 import { AudioPreview } from './AudioPreview';
-import { Notification } from './Notification';
 import { Input } from './ui';
+import { useNotification } from './Notification';
 
 interface TtsFormProps {
     onSuccess?: (result: TtsResponse) => void;
@@ -25,10 +25,14 @@ export const TtsForm: React.FC<TtsFormProps> = ({ onSuccess, userId, isAdmin }) 
     const [isPlaying, setIsPlaying] = useState(false);
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const [audioUrl, setAudioUrl] = useState<string | null>(null);
-    const [notification, setNotification] = useState<{
-        message: string;
-        type: 'success' | 'error' | 'warning' | 'info';
-    } | null>(null);
+    const { setNotification } = useNotification();
+    const [cfToken, setCfToken] = useState<string>('');
+    const [cfVerified, setCfVerified] = useState(false);
+    const [cfError, setCfError] = useState(false);
+    const [cfHidden, setCfHidden] = useState(false);
+    const [cfInstanceId, setCfInstanceId] = useState(0);
+    const [cfLoading, setCfLoading] = useState(true);
+    const turnstileRef = useRef<HTMLDivElement>(null);
 
     const { generateSpeech, loading, error: ttsError, audioUrl: ttsAudioUrl } = useTts();
 
@@ -42,6 +46,32 @@ export const TtsForm: React.FC<TtsFormProps> = ({ onSuccess, userId, isAdmin }) 
     ];
 
     const MAX_TEXT_LENGTH = 4096;
+
+    // 默认关闭人机验证，只有明确设置为 'true' 时才启用
+    const enableTurnstile = import.meta.env.VITE_ENABLE_TURNSTILE === 'true';
+
+    // 设置全局Turnstile回调函数
+    useEffect(() => {
+        // 定义全局回调函数
+        (window as any).turnstileCallback = (token: string) => {
+            handleCfVerify(token);
+        };
+        
+        (window as any).turnstileExpiredCallback = () => {
+            handleCfExpire();
+        };
+        
+        (window as any).turnstileErrorCallback = () => {
+            handleCfError();
+        };
+
+        // 清理函数
+        return () => {
+            delete (window as any).turnstileCallback;
+            delete (window as any).turnstileExpiredCallback;
+            delete (window as any).turnstileErrorCallback;
+        };
+    }, []);
 
     useEffect(() => {
         const savedCooldown = localStorage.getItem('ttsCooldown');
@@ -58,6 +88,32 @@ export const TtsForm: React.FC<TtsFormProps> = ({ onSuccess, userId, isAdmin }) 
             setAudioUrl(ttsAudioUrl);
         }
     }, [ttsAudioUrl]);
+
+    // 只负责渲染，不再插入script
+    useEffect(() => {
+        setCfLoading(true);
+        const sitekey = '0x4AAAAAABkocXH4KiqcoV1a';
+        if (turnstileRef.current && (window as any).turnstile) {
+            try {
+                // 官方隐式渲染方式
+                (window as any).turnstile.render(turnstileRef.current, {
+                    sitekey,
+                    theme: 'light',
+                    size: 'normal',
+                    callback: (token: string) => handleCfVerify(token),
+                    'expired-callback': () => handleCfExpire(),
+                    'error-callback': () => handleCfError(),
+                });
+                setCfError(false);
+            } catch (error) {
+                setCfError(true);
+            }
+        } else {
+            setCfError(true);
+        }
+        setCfLoading(false);
+        // eslint-disable-next-line
+    }, [cfInstanceId]);
 
     const startCooldown = (duration: number) => {
         setCooldown(true);
@@ -96,6 +152,15 @@ export const TtsForm: React.FC<TtsFormProps> = ({ onSuccess, userId, isAdmin }) 
             return;
         }
 
+        // 只有在启用人机验证时才检查验证状态
+        if (enableTurnstile && (!cfVerified || !cfToken)) {
+            setError('请完成人机验证');
+            return;
+        }
+
+        // 验证通过后隐藏验证组件
+        setCfHidden(true);
+
         try {
             const request: TtsRequest = {
                 text,
@@ -106,7 +171,9 @@ export const TtsForm: React.FC<TtsFormProps> = ({ onSuccess, userId, isAdmin }) 
                 userId,
                 isAdmin,
                 customFileName: `tts-${Date.now()}`,
-                generationCode
+                generationCode,
+                // 只有在启用人机验证时才发送 cfToken
+                ...(enableTurnstile && { cfToken })
             };
 
             const result = await generateSpeech(request);
@@ -123,11 +190,17 @@ export const TtsForm: React.FC<TtsFormProps> = ({ onSuccess, userId, isAdmin }) 
                 });
             }
 
+            // 生成成功后重置验证状态，为下一次生成做准备
+            resetCfVerification();
+
             if (onSuccess) {
                 onSuccess(result);
             }
         } catch (error: any) {
             console.error('TTS生成错误:', error);
+            
+            // 生成失败时重置验证状态，允许用户重新验证
+            resetCfVerification();
             
             if (error.message.includes('封禁')) {
                 setNotification({
@@ -153,12 +226,21 @@ export const TtsForm: React.FC<TtsFormProps> = ({ onSuccess, userId, isAdmin }) 
                     message: `生成码验证失败`,
                     type: 'error'
                 });
+            } else if (error.message.includes('人机验证失败')) {
+                setNotification({
+                    message: '人机验证失败，请重新验证',
+                    type: 'error'
+                });
             } else {
                 setNotification({
                     message: error.message || '生成失败，请稍后重试',
                     type: 'error'
                 });
             }
+        } finally {
+            // 每次提交后都重置cf验证状态并强制刷新cf-turnstile
+            resetCfVerification();
+            setCfInstanceId(id => id + 1);
         }
     };
 
@@ -175,24 +257,40 @@ export const TtsForm: React.FC<TtsFormProps> = ({ onSuccess, userId, isAdmin }) 
 
     const displayError = error || ttsError;
 
+    const handleCfVerify = (token: string) => {
+        setCfToken(token);
+        setCfVerified(true);
+        setCfError(false);
+        setCfHidden(false); // 确保验证组件可见
+    };
+
+    const handleCfExpire = () => {
+        setCfToken('');
+        setCfVerified(false);
+        setCfError(false);
+        setCfHidden(false); // 过期时显示验证组件
+    };
+
+    const handleCfError = () => {
+        setCfToken('');
+        setCfVerified(false);
+        setCfError(true);
+        setCfHidden(false); // 错误时显示验证组件
+    };
+
+    // 重置验证状态，用于下一次生成
+    const resetCfVerification = () => {
+        setCfToken('');
+        setCfVerified(false);
+        setCfError(false);
+        setCfHidden(false);
+    };
+
     return (
         <div className="relative">
             <AnimatePresence>
-                {notification && (
-                    <motion.div
-                        className="absolute -top-4 left-0 right-0 z-50"
-                        initial={{ opacity: 0, y: -20, scale: 0.95 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: -20, scale: 0.95 }}
-                        transition={{ duration: 0.3 }}
-                    >
-                        <Notification
-                            message={notification.message}
-                            type={notification.type}
-                            onClose={() => setNotification(null)}
-                        />
-                    </motion.div>
-                )}
+                {/* 所有 setNotification({ message, type }) 保持不变，直接调用 context */}
+                {/* 删除 notification 渲染相关代码 */}
             </AnimatePresence>
 
             <motion.form 
@@ -399,6 +497,96 @@ export const TtsForm: React.FC<TtsFormProps> = ({ onSuccess, userId, isAdmin }) 
                         </motion.p>
                     </motion.div>
                 </motion.div>
+
+                {/* 人机验证区域（可选） */}
+                {enableTurnstile && (
+                    <div>
+                        <AnimatePresence>
+                            {!cfHidden && (
+                                <motion.div
+                                    initial={{ opacity: 0, y: 20 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    exit={{ opacity: 0, y: -20, height: 0 }}
+                                    transition={{ duration: 0.5, delay: 1.0 }}
+                                >
+                                    <motion.label 
+                                        className="block text-gray-700 text-lg font-semibold mb-3"
+                                        initial={{ opacity: 0, y: -10 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        transition={{ duration: 0.3, delay: 1.1 }}
+                                    >
+                                        人机验证
+                                        <span className="text-red-500 ml-1">*</span>
+                                    </motion.label>
+                                    {/* 只保留官方Turnstile组件，无任何装饰样式 */}
+                                    <div>
+                                        <div
+                                            className="cf-turnstile"
+                                            data-sitekey="0x4AAAAAABkocXH4KiqcoV1a"
+                                            // data-theme="light"
+                                            // data-callback="turnstileCallback"
+                                            // data-expired-callback="turnstileExpiredCallback"
+                                            // data-error-callback="turnstileErrorCallback"
+                                        />
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+                        {/* 验证失败提示 */}
+                        <AnimatePresence>
+                            {cfError && (
+                                <motion.div
+                                    className="flex items-center justify-center bg-gradient-to-r from-red-50 to-pink-50 border-2 border-red-200 rounded-xl p-3 shadow-sm"
+                                    initial={{ opacity: 0, scale: 0.8, y: -10 }}
+                                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                                    exit={{ opacity: 0, scale: 0.8, y: -10 }}
+                                    transition={{ duration: 0.4, type: "spring", stiffness: 200 }}
+                                >
+                                    <div className="flex flex-col items-center space-y-2">
+                                        <div className="flex items-center space-x-2">
+                                            <div className="w-6 h-6 bg-gradient-to-r from-red-400 to-pink-500 rounded-full flex items-center justify-center">
+                                                <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 20 20">
+                                                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                                                </svg>
+                                            </div>
+                                            <span className="text-red-700 font-medium">验证失败，请重试</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setCfError(false);
+                                                    setCfLoading(true);
+                                                    setCfInstanceId(id => id + 1);
+                                                }}
+                                                className="mt-2 px-3 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                                            >
+                                                重试
+                                            </button>
+                                        </div>
+                                        {/* 详细错误信息打印 */}
+                                        {cfError && typeof cfError === 'object' && (
+                                            <pre className="mt-2 text-xs text-red-500 bg-red-100 rounded p-2 max-w-xl overflow-x-auto">
+                                                {JSON.stringify(cfError, null, 2)}
+                                            </pre>
+                                        )}
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+                        
+                        {/* 安全验证说明 */}
+                        <motion.div
+                            className="flex items-center justify-center space-x-2 text-sm text-gray-600 mt-2"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            transition={{ duration: 0.3, delay: 1.3 }}
+                        >
+                            <svg className="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                            </svg>
+                            <span>请完成人机验证以证明您是人类用户，保护系统免受自动化攻击</span>
+                        </motion.div>
+                    </div>
+                )}
 
                 <AnimatePresence>
                     {displayError && (

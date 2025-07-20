@@ -3,6 +3,22 @@ import { UserStorage, User } from '../utils/userStorage';
 import logger from '../utils/logger';
 import fs from 'fs';
 import path from 'path';
+import { EmailService } from '../services/emailService';
+
+// 支持的主流邮箱后缀
+const allowedDomains = [
+  'gmail.com', 'outlook.com', 'qq.com', '163.com', '126.com',
+  'hotmail.com', 'yahoo.com', 'icloud.com', 'foxmail.com'
+];
+const emailPattern = new RegExp(
+  `^[\\w.-]+@(${allowedDomains.map(d => d.replace('.', '\\.')).join('|')})$`
+);
+
+// 临时存储验证码（生产建议用redis等持久化）
+const emailCodeMap = new Map();
+
+// 顶部 import 后添加类型声明
+type UserWithVerified = User & { verified?: boolean };
 
 export class AuthController {
 
@@ -14,6 +30,11 @@ export class AuthController {
                 return res.status(400).json({
                     error: '请提供所有必需的注册信息'
                 });
+            }
+
+            // 只允许主流邮箱
+            if (!emailPattern.test(email)) {
+                return res.status(400).json({ error: '只支持主流邮箱（如gmail、outlook、qq、163、126、hotmail、yahoo、icloud、foxmail等）' });
             }
 
             // 验证邮箱格式
@@ -31,12 +52,67 @@ export class AuthController {
                 });
             }
 
-            // 不返回密码
-            const { password: _, ...userWithoutPassword } = user;
-            res.status(201).json(userWithoutPassword);
+            // 生成8位数字+大小写字母验证码
+            const chars = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+            let code = '';
+            for (let i = 0; i < 8; i++) {
+              code += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            emailCodeMap.set(email, code);
+            // 精美HTML邮件内容
+            const html = `
+              <div style="max-width:420px;margin:32px auto;padding:32px 24px;background:linear-gradient(135deg,#6366f1 0%,#a5b4fc 100%);border-radius:20px;box-shadow:0 4px 24px 0 rgba(99,102,241,0.08);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Oxygen','Ubuntu','Cantarell',sans-serif;">
+                <div style="text-align:center;margin-bottom:24px;">
+                  <div style="font-size:38px;color:#6366f1;">🔐</div>
+                  <h2 style="margin:0 0 8px 0;color:#fff;font-size:1.8rem;font-weight:700;letter-spacing:1px;">邮箱验证</h2>
+                  <p style="color:#e0e7ff;font-size:1.1rem;margin:0;">欢迎注册 Happy-TTS</p>
+                </div>
+                <div style="background:#fff;border-radius:16px;padding:24px 16px;margin-bottom:24px;box-shadow:0 2px 8px rgba(99,102,241,0.06);">
+                  <div style="text-align:center;font-size:1.1rem;color:#6366f1;font-weight:600;letter-spacing:2px;">您的验证码</div>
+                  <div style="font-size:2.2rem;font-weight:700;color:#4f46e5;letter-spacing:6px;margin:18px 0 8px 0;">${code}</div>
+                  <div style="color:#64748b;font-size:0.95rem;">有效期：5分钟。请勿泄露验证码。</div>
+                </div>
+                <div style="text-align:center;color:#64748b;font-size:0.95rem;">如非本人操作，请忽略此邮件。</div>
+                <div style="margin-top:32px;text-align:center;">
+                  <span style="color:#818cf8;font-size:1.1rem;font-weight:600;">Happy-TTS 团队</span>
+                </div>
+              </div>
+            `;
+            await EmailService.sendEmail({
+              from: 'noreply@hapxs.com',
+              to: [email],
+              subject: 'Happy-TTS 注册验证码',
+              html,
+              text: `您的注册验证码为：${code}，5分钟内有效。`
+            });
+            // 返回需验证
+            res.status(200).json({ needVerify: true });
         } catch (error) {
             logger.error('注册失败:', error);
             res.status(500).json({ error: '注册失败' });
+        }
+    }
+
+    public static async verifyEmail(req: Request, res: Response) {
+        try {
+            const { email, code } = req.body;
+            if (!email || !code) {
+                return res.status(400).json({ error: '参数缺失' });
+            }
+            const realCode = emailCodeMap.get(email);
+            if (!realCode) {
+                return res.status(400).json({ error: '请先注册获取验证码' });
+            }
+            if (realCode !== code) {
+                return res.status(400).json({ error: '验证码错误' });
+            }
+            // 验证通过，正式创建用户
+            // 这里假设注册信息已暂存，实际可用redis等存储注册信息
+            // 简化：直接允许登录
+            emailCodeMap.delete(email);
+            res.json({ success: true });
+        } catch (error) {
+            res.status(500).json({ error: '邮箱验证失败' });
         }
     }
 
@@ -154,20 +230,47 @@ export class AuthController {
                 });
             }
             
-            // 解析 JWT token 获取 userId
+            // 尝试解析JWT token，如果失败则使用token作为userId
             let userId: string;
+            let isJWTToken = false;
             try {
                 const decoded: any = require('jsonwebtoken').verify(token, require('../config/config').config.jwtSecret);
                 userId = decoded.userId;
+                isJWTToken = true;
+                logger.info('使用JWT token解析用户ID', { userId, tokenType: 'JWT' });
             } catch (e) {
-                return res.status(401).json({ error: '认证令牌无效或已过期' });
+                // JWT解析失败，尝试使用token作为用户ID（兼容旧的登录方式）
+                userId = token;
+                isJWTToken = false;
+                logger.info('使用token作为用户ID', { userId, tokenType: 'UserID' });
             }
             
+            // 验证token是否有效（检查用户是否存在且token未过期）
             const user = await UserStorage.getUserById(userId);
             if (!user) {
+                logger.warn('getUserById: 未找到用户', { 
+                    id: userId, 
+                    tokenType: isJWTToken ? 'JWT' : 'UserID',
+                    storageMode: process.env.USER_STORAGE_MODE || 'file'
+                });
                 return res.status(404).json({
                     error: '用户不存在'
                 });
+            }
+            
+            // 对于UserID类型的token，检查过期时间和匹配性
+            if (!isJWTToken) {
+                // 检查token是否过期
+                if (user.tokenExpiresAt && Date.now() > user.tokenExpiresAt) {
+                    logger.warn('token已过期', { userId, tokenExpiresAt: user.tokenExpiresAt, now: Date.now() });
+                    return res.status(401).json({ error: '认证令牌已过期' });
+                }
+                
+                // 验证token是否匹配
+                if (user.token !== token) {
+                    logger.warn('token不匹配', { userId, storedToken: user.token, providedToken: token });
+                    return res.status(401).json({ error: '认证令牌无效' });
+                }
             }
             
             const remainingUsage = await UserStorage.getRemainingUsage(userId);
@@ -243,19 +346,16 @@ export class AuthController {
                 credentialId: passkeyCredentialId.substring(0, 10) + '...'
             });
             
-            // 生成正式 token（使用用户ID作为token）
-            const token = user.id;
-            await updateUserToken(user.id, token);
+            // 生成JWT token
+            const jwt = require('jsonwebtoken');
+            const config = require('../config/config').config;
+            const token = jwt.sign({ userId: user.id }, config.jwtSecret, { expiresIn: '2h' });
             
-            // 验证token与用户ID的一致性
-            if (token !== user.id) {
-                logger.error('[AuthController] Token生成错误：token与用户ID不匹配', {
-                    username,
-                    userId: user.id,
-                    generatedToken: token
-                });
-                return res.status(500).json({ error: 'Token生成失败' });
-            }
+            logger.info('[AuthController] Passkey验证成功，生成JWT token', { 
+                userId: user.id, 
+                username,
+                tokenType: 'JWT'
+            });
             
             const { password: _, ...userWithoutPassword } = user;
             return res.json({ 
@@ -276,70 +376,192 @@ export class AuthController {
         }
     }
 
+    // 新增 GET /api/user/profile 获取当前用户信息
+    public static async getUserProfile(req: Request, res: Response) {
+        try {
+            const userId = req.params.id || req.user?.id; // 从请求参数或认证头中获取用户ID
+            if (!userId) {
+                return res.status(401).json({ error: '未登录或用户ID缺失' });
+            }
+
+            const user = await UserStorage.getUserById(userId);
+            if (!user) {
+                return res.status(404).json({ error: '用户不存在' });
+            }
+
+            const { password: _, ...userWithoutPassword } = user;
+            res.json(userWithoutPassword);
+        } catch (error) {
+            logger.error('获取用户信息失败:', error);
+            res.status(500).json({ error: '获取用户信息失败' });
+        }
+    }
+
+    // 新增 POST /api/user/profile 修改邮箱、密码、头像，需验证通过
+    public static async updateUserProfile(req: Request, res: Response) {
+        try {
+            const userId = req.user?.id; // 从认证头中获取用户ID
+            if (!userId) {
+                return res.status(401).json({ error: '未登录或用户ID缺失' });
+            }
+
+            const { email, password, newPassword } = req.body;
+
+            if (email) {
+                if (!emailPattern.test(email)) {
+                    return res.status(400).json({ error: '只支持主流邮箱（如gmail、outlook、qq、163、126、hotmail、yahoo、icloud、foxmail等）' });
+                }
+                const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+                if (!emailRegex.test(email)) {
+                    return res.status(400).json({ error: '邮箱格式不正确' });
+                }
+                const existingUser = await UserStorage.getUserByEmail(email);
+                if (existingUser && existingUser.id !== userId) {
+                    return res.status(400).json({ error: '邮箱已被其他用户使用' });
+                }
+            }
+
+            if (password) {
+                const user = await UserStorage.authenticateUser((req.user as any)?.username || (req.user as any)?.email || '', password);
+                if (!user) {
+                    return res.status(401).json({ error: '当前密码错误' });
+                }
+            }
+
+            if (newPassword) {
+                if (password === newPassword) {
+                    return res.status(400).json({ error: '新密码与当前密码相同' });
+                }
+                await UserStorage.updateUser(userId, { password: newPassword });
+            }
+
+            if (email) {
+                await UserStorage.updateUser(userId, { email });
+            }
+
+            const updatedUser = await UserStorage.getUserById(userId);
+            if (!updatedUser) {
+                return res.status(404).json({ error: '用户不存在' });
+            }
+
+            const { password: _, ...userWithoutPassword } = updatedUser;
+            res.json(userWithoutPassword);
+        } catch (error) {
+            logger.error('更新用户信息失败:', error);
+            res.status(500).json({ error: '更新用户信息失败' });
+        }
+    }
+
+    // 新增 POST /api/user/verify 支持邮箱验证码、TOTP等验证方式
+    public static async verifyUser(req: Request, res: Response) {
+        try {
+            const { userId, verificationCode } = req.body;
+            if (!userId || !verificationCode) {
+                return res.status(400).json({ error: '用户ID或验证码缺失' });
+            }
+
+            const user = await UserStorage.getUserById(userId);
+            if (!user) {
+                return res.status(404).json({ error: '用户不存在' });
+            }
+
+            // 检查是否启用了TOTP或Passkey
+            const hasTOTP = !!user.totpEnabled;
+            const hasPasskey = Array.isArray(user.passkeyCredentials) && user.passkeyCredentials.length > 0;
+
+            if (!hasTOTP && !hasPasskey) {
+                return res.status(400).json({ error: '用户未启用任何二次验证' });
+            }
+
+            let verificationResult = false;
+            if (hasTOTP) {
+                // TOTP验证
+                if (user.totpSecret) {
+                    const totp = require('otplib');
+                    totp.options = {
+                        digits: 6,
+                        step: 30,
+                        window: 1
+                    };
+                    const isValid = totp.verify({
+                        secret: user.totpSecret,
+                        token: verificationCode,
+                        encoding: 'hex'
+                    });
+                    if (isValid) {
+                        verificationResult = true;
+                        logger.info(`TOTP验证成功: userId=${userId}, token=${verificationCode}`);
+                    } else {
+                        logger.warn(`TOTP验证失败: userId=${userId}, token=${verificationCode}`);
+                    }
+                } else {
+                    logger.warn(`TOTP验证失败: userId=${userId}, 用户未启用TOTP`);
+                }
+            }
+
+            if (!verificationResult && hasPasskey) {
+                // Passkey验证
+                const { username, passkeyCredentials } = user;
+                if (username && passkeyCredentials && passkeyCredentials.length > 0) {
+                    const found = passkeyCredentials.some(
+                        cred => cred.credentialID === verificationCode
+                    );
+                    if (found) {
+                        verificationResult = true;
+                        logger.info(`Passkey验证成功: userId=${userId}, credentialId=${verificationCode}`);
+                    } else {
+                        logger.warn(`Passkey验证失败: userId=${userId}, credentialId=${verificationCode}`);
+                    }
+                } else {
+                    logger.warn(`Passkey验证失败: userId=${userId}, 用户未启用Passkey`);
+                }
+            }
+
+            if (!verificationResult) {
+                return res.status(401).json({ error: '验证码错误或用户未启用二次验证' });
+            }
+
+            // 验证通过，更新用户状态
+            await UserStorage.updateUser(userId, { verified: true } as Partial<UserWithVerified>);
+            logger.info(`用户 ${userId} 验证成功`);
+            res.json({ success: true });
+        } catch (error) {
+            logger.error('用户验证失败:', error);
+            res.status(500).json({ error: '用户验证失败' });
+        }
+    }
+
 
 }
 
 // 辅助函数：写入token和过期时间到users.json
 async function updateUserToken(userId: string, token: string, expiresInMs = 2 * 60 * 60 * 1000) {
-    const USERS_FILE = path.join(process.cwd(), 'data', 'users.json');
-    if (!fs.existsSync(USERS_FILE)) return;
-    
-    try {
-        const data = await fs.promises.readFile(USERS_FILE, 'utf-8');
-        const users = JSON.parse(data);
-        const idx = users.findIndex((u: any) => u.id === userId);
-        if (idx !== -1) {
-            users[idx].token = token;
-            users[idx].tokenExpiresAt = Date.now() + expiresInMs;
-            await fs.promises.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
-        }
-    } catch (error) {
-        logger.error('更新用户token失败:', error);
-    }
+    await UserStorage.updateUser(userId, { token, tokenExpiresAt: Date.now() + expiresInMs });
 }
 
-// 校验token及过期
+// 校验管理员token
 export async function isAdminToken(token: string | undefined): Promise<boolean> {
-    const USERS_FILE = path.join(process.cwd(), 'data', 'users.json');
-    if (!fs.existsSync(USERS_FILE)) return false;
-    
-    try {
-        const data = await fs.promises.readFile(USERS_FILE, 'utf-8');
-        const users = JSON.parse(data);
-        const user = users.find((u: any) => u.role === 'admin' && u.token === token);
-        if (!user) return false;
-        if (!user.tokenExpiresAt || Date.now() > user.tokenExpiresAt) return false;
-        return true;
-    } catch (error) {
-        logger.error('校验管理员token失败:', error);
-        return false;
-    }
+    if (!token) return false;
+    const users = await UserStorage.getAllUsers();
+    const user = users.find(u => u.role === 'admin' && u.token === token);
+    if (!user) return false;
+    if (!user.tokenExpiresAt || Date.now() > user.tokenExpiresAt) return false;
+    return true;
 }
 
 // 登出接口
 export function registerLogoutRoute(app: any) {
-    app.post('/api/auth/logout', async (req: Request, res: Response) => {
+    app.post('/api/auth/logout', async (req: any, res: any) => {
         try {
             const token = req.headers.authorization?.replace('Bearer ', '');
-            const USERS_FILE = path.join(process.cwd(), 'data', 'users.json');
-            
-            if (!fs.existsSync(USERS_FILE)) {
-                return res.status(500).json({ error: '用户数据不存在' });
-            }
-            
-            const data = await fs.promises.readFile(USERS_FILE, 'utf-8');
-            const users = JSON.parse(data);
+            if (!token) return res.json({ success: true });
+            const users = await UserStorage.getAllUsers();
             const idx = users.findIndex((u: any) => u.token === token);
-            
             if (idx !== -1) {
-                users[idx].token = undefined;
-                users[idx].tokenExpiresAt = undefined;
-                await fs.promises.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+                await UserStorage.updateUser(users[idx].id, { token: undefined, tokenExpiresAt: undefined });
             }
-            
             res.json({ success: true });
         } catch (error) {
-            logger.error('登出失败:', error);
             res.status(500).json({ error: '登出失败' });
         }
     });

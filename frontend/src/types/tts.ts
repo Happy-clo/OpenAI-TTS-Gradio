@@ -8,11 +8,13 @@ export interface TtsRequest {
   isAdmin?: boolean;
   customFileName?: string;
   generationCode: string;
+  cfToken?: string; // Cloudflare Turnstile token
 }
 
 export interface TtsResponse {
   success: boolean;
-  audioUrl: string;
+  audioUrl?: string;
+  fileName?: string; // 兼容后端 fileName 字段
   signature: string;
   isDuplicate?: boolean;
 } 

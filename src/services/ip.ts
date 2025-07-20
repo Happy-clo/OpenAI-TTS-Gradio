@@ -4,6 +4,16 @@ import { join } from 'path';
 import { existsSync } from 'fs';
 import config from '../config';
 import { logger } from './logger';
+import cheerio from 'cheerio';
+import mongoose from './mongoService';
+
+// MongoDB IP信息 Schema
+const IPInfoSchema = new mongoose.Schema({
+  ip: { type: String, required: true, unique: true },
+  info: { type: Object, required: true },
+  timestamp: { type: Number, required: true },
+}, { collection: 'ip_infos' });
+const IPInfoModel = mongoose.models.IPInfo || mongoose.model('IPInfo', IPInfoSchema);
 
 interface IPInfo {
   ip: string;
@@ -127,8 +137,120 @@ async function withConcurrencyLimit<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// 尝试使用所有API提供商
+/**
+ * SSRF防护：只允许合法公网IPv4，禁止内网、环回、保留、0.0.0.0、255.255.255.255等危险IP
+ */
+function isValidPublicIPv4(ip: string): boolean {
+  const ipv4Regex = /^(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(\.(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}$/;
+  if (!ipv4Regex.test(ip)) return false;
+  const parts = ip.split('.').map(Number);
+  if (
+    ip.startsWith('10.') ||
+    ip.startsWith('192.168.') ||
+    (ip.startsWith('172.') && parts[1] >= 16 && parts[1] <= 31) ||
+    ip.startsWith('127.') ||
+    ip === '0.0.0.0' ||
+    ip === '255.255.255.255'
+  ) return false;
+  return true;
+}
+
+// 新增IP38网页解析方法
+async function queryIp38(ip: string): Promise<IPInfo> {
+  // SSRF防护：已严格校验ip为公网IPv4，禁止内网/环回/保留/0.0.0.0/255.255.255.255
+  if (!isValidPublicIPv4(ip)) {
+    throw new Error('非法IP，禁止查询内网/环回/保留/危险地址');
+  }
+  try {
+    // codeql[request-forgery]: ip已严格校验为公网IPv4
+    const url = `https://www.ip38.com/ip/${encodeURIComponent(ip)}.htm`;
+    const resp = await axios.get(url, { timeout: 8000 });
+    const html = resp.data;
+    const $ = cheerio.load(html);
+    // 解析页面结构
+    // IP: 页面h1下的 .query-box strong
+    // 结果: .query-box .result-data
+    // 兼容页面变动，优先找高亮IP和红色归属地
+    const ipText = $('h1 strong').first().text().trim() || ip;
+    let country = '未知', region = '未知', city = '未知', isp = '未知';
+    // 解析红色归属地
+    const resultText = $('.query-box .result-data').text().replace(/\s+/g, ' ').trim();
+    // 例：中国 香港 新界 荃湾区 IPXO
+    if (resultText) {
+      const parts = resultText.split(' ');
+      if (parts.length >= 1) country = parts[0];
+      if (parts.length >= 2) region = parts[1];
+      if (parts.length >= 3) city = parts[2];
+      if (parts.length >= 4) isp = parts.slice(3).join(' ');
+    }
+    return { ip: ipText, country, region, city, isp };
+  } catch (e: any) {
+    logger.error('ip38.com 网页查询失败', { ip, error: e.message });
+    throw e;
+  }
+}
+
+// 新增tool.lu/ip/ajax.html查询方法
+async function queryToolLu(ip: string): Promise<IPInfo> {
+  // SSRF防护：仅允许合法的公网IPv4，禁止内网、环回/保留地址
+  if (!isValidPublicIPv4(ip)) {
+    throw new Error('非法IP，禁止查询内网/环回/保留地址');
+  }
+  try {
+    // 只允许拼接到可信第三方的IP查询接口，避免SSRF
+    const resp = await axios.post('https://tool.lu/ip/ajax.html', `ip=${encodeURIComponent(ip)}`, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      timeout: 8000
+    });
+    const data = resp.data;
+    if (data && data.status && data.text) {
+      // 优先用chunzhen字段
+      let country = '未知', region = '未知', city = '未知', isp = '未知';
+      if (data.text.chunzhen) {
+        // 例：中国 山东 济宁 电信
+        const parts = data.text.chunzhen.split(' ');
+        if (parts.length >= 1) country = parts[0];
+        if (parts.length >= 2) region = parts[1];
+        if (parts.length >= 3) city = parts[2];
+        if (parts.length >= 4) isp = parts.slice(3).join(' ');
+      }
+      return {
+        ip: data.text.ip || ip,
+        country,
+        region,
+        city,
+        isp
+      };
+    }
+    throw new Error('tool.lu 响应格式异常');
+  } catch (e: any) {
+    logger.error('tool.lu/ip/ajax.html 查询失败', { ip, error: e.message });
+    throw e;
+  }
+}
+
+// 优先用ip38.com网页，其次用tool.lu，再用API_PROVIDERS
 async function tryAllProviders(ip: string): Promise<IPInfo> {
+  // SSRF防护：只允许合法公网IPv4，禁止内网/环回/保留/非法IP
+  if (!isValidPublicIPv4(ip)) {
+    throw new Error('非法IP，禁止查询内网/环回/保留地址');
+  }
+  // 先尝试ip38网页
+  try {
+    return await queryIp38(ip);
+  } catch (e: any) {
+    logger.error('ip38.com 查询失败，尝试tool.lu', { ip });
+  }
+  // 再尝试tool.lu
+  try {
+    return await queryToolLu(ip);
+  } catch (e: any) {
+    logger.error('tool.lu 查询失败，尝试备用API', { ip });
+  }
+  // 失败后fallback到原有API
   for (const provider of API_PROVIDERS) {
     try {
       const response = await axios.get(provider.url(ip), {
@@ -137,7 +259,6 @@ async function tryAllProviders(ip: string): Promise<IPInfo> {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
       });
-
       if (provider.validate(response.data)) {
         return provider.transform(response.data, ip);
       }
@@ -155,27 +276,73 @@ const DATA_DIR = join(process.cwd(), 'data');
 const IP_DATA_FILE = join(DATA_DIR, 'ip-info.json');
 const LOCAL_CACHE: { [key: string]: IPInfo } = {};
 
+// MongoDB写入速率限制队列
+const mongoWriteQueue: (() => Promise<void>)[] = [];
+let mongoWriteCount = 0;
+let mongoWriteTimer: NodeJS.Timeout | null = null;
+
+function scheduleMongoWrite(task: () => Promise<void>) {
+  mongoWriteQueue.push(task);
+  processMongoWriteQueue();
+}
+
+function processMongoWriteQueue() {
+  if (mongoWriteCount >= 20) {
+    if (!mongoWriteTimer) {
+      mongoWriteTimer = setTimeout(() => {
+        mongoWriteCount = 0;
+        mongoWriteTimer = null;
+        processMongoWriteQueue();
+      }, 1000);
+    }
+    return;
+  }
+  while (mongoWriteQueue.length && mongoWriteCount < 20) {
+    const task = mongoWriteQueue.shift();
+    if (task) {
+      mongoWriteCount++;
+      task().catch(e => logger.error('MongoDB写入队列任务失败', e));
+    }
+  }
+  if (mongoWriteQueue.length && !mongoWriteTimer) {
+    mongoWriteTimer = setTimeout(() => {
+      mongoWriteCount = 0;
+      mongoWriteTimer = null;
+      processMongoWriteQueue();
+    }, 1000);
+  }
+}
+
 // 初始化本地存储
 async function initializeLocalStorage(): Promise<void> {
   try {
-    // 确保 data 目录存在
+    if (mongoose.connection.readyState === 1) {
+      // MongoDB: 加载所有IP到本地缓存
+      const all = await IPInfoModel.find().lean();
+      for (const doc of all) {
+        LOCAL_CACHE[doc.ip] = { ...doc.info, timestamp: doc.timestamp };
+      }
+      logger.log(`Loaded ${all.length} IP records from MongoDB`);
+      return;
+    }
+  } catch (error) {
+    logger.error('MongoDB 加载 IP 信息失败，降级为本地文件:', error);
+  }
+  // 本地文件兜底
+  try {
     if (!existsSync(DATA_DIR)) {
       await mkdir(DATA_DIR, { recursive: true });
       logger.log('Created data directory for IP info');
     }
-
-    // 检查并初始化 IP 信息文件
     if (!existsSync(IP_DATA_FILE)) {
       await writeFile(IP_DATA_FILE, JSON.stringify({}, null, 2));
       logger.log('Created empty IP info file');
     } else {
-      // 读取本地存储的 IP 信息
       try {
         const data = await readFile(IP_DATA_FILE, 'utf-8');
         Object.assign(LOCAL_CACHE, JSON.parse(data));
         logger.log(`Loaded ${Object.keys(LOCAL_CACHE).length} IP records from local storage`);
       } catch (error) {
-        // 如果文件损坏或格式错误，重新创建
         logger.error('Error reading IP info file, creating new one:', error);
         await writeFile(IP_DATA_FILE, JSON.stringify({}, null, 2));
         Object.keys(LOCAL_CACHE).forEach(key => delete LOCAL_CACHE[key]);
@@ -189,11 +356,28 @@ async function initializeLocalStorage(): Promise<void> {
 // 保存 IP 信息到本地文件
 async function saveIPInfoToLocal(info: IPInfo): Promise<void> {
   try {
+    if (mongoose.connection.readyState === 1) {
+      // 限速写入MongoDB，后台排队
+      scheduleMongoWrite(async () => {
+        await IPInfoModel.findOneAndUpdate(
+          { ip: info.ip },
+          { info, timestamp: Date.now() },
+          { upsert: true }
+        );
+        LOCAL_CACHE[info.ip] = { ...info, timestamp: Date.now() };
+      });
+      // 优先返回，不等待写入完成
+      return;
+    }
+  } catch (error) {
+    logger.error('MongoDB 保存 IP 信息失败，降级为本地文件:', error);
+  }
+  // 本地文件兜底
+  try {
     LOCAL_CACHE[info.ip] = {
       ...info,
       timestamp: Date.now()
     };
-    
     await writeFile(IP_DATA_FILE, JSON.stringify(LOCAL_CACHE, null, 2));
   } catch (error) {
     logger.error('Error saving IP info to local storage:', error);
@@ -228,73 +412,65 @@ function setIpCache(ip: string, value: { info: IPInfo; timestamp: number }) {
 }
 
 export async function getIPInfo(ip: string): Promise<IPInfo> {
-  try {
-    // 处理特殊IP
-    if (!ip || ip === '::1' || ip === 'localhost') {
-      ip = '127.0.0.1';
-    }
-    
-    // 移除IPv6前缀
-    ip = ip.replace(/^::ffff:/, '');
-
-    // 检查是否是内网IP
-    if (isPrivateIP(ip)) {
-      return getPrivateIPInfo(ip);
-    }
-
-    // 先检查内存缓存
-    const cached = ipCache.get(ip);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-      return cached.info;
-    }
-
-    // 检查本地存储
-    const localInfo = getIPInfoFromLocal(ip);
-    if (localInfo) {
-      // 更新内存缓存
-      setIpCache(ip, { info: localInfo, timestamp: Date.now() });
-      return localInfo;
-    }
-
-    return await withConcurrencyLimit(async () => {
-      return await withRetry(async () => {
-        const info = await tryAllProviders(ip);
-        
-        // 更新内存缓存
-        setIpCache(ip, { info, timestamp: Date.now() });
-        
-        // 保存到本地存储
-        await saveIPInfoToLocal(info);
-        
-        return info;
-      });
-    });
-  } catch (error) {
-    logger.error('IP info error:', error);
-    
-    // 如果内存缓存中有旧数据，返回旧数据
-    const cached = ipCache.get(ip);
-    if (cached) {
-      logger.log(`使用内存缓存的IP信息: ${ip}`);
-      return cached.info;
-    }
-    
-    // 如果本地存储中有数据（即使过期），也返回
-    const localInfo = LOCAL_CACHE[ip];
-    if (localInfo) {
-      logger.log(`使用本地存储的IP信息: ${ip}`);
-      return localInfo;
-    }
-    
-    // 如果所有方法都失败，返回一个基本的信息
+  if (!isValidPublicIPv4(ip)) {
     return {
       ip,
-      country: '未知',
-      region: '未知',
-      city: '未知',
-      isp: '未知'
+      country: '非法IP',
+      region: '非法IP',
+      city: '非法IP',
+      isp: '非法IP'
     };
   }
+  let lastError: any = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      // 处理特殊IP
+      if (!ip || ip === '::1' || ip === 'localhost') {
+        ip = '127.0.0.1';
+      }
+      ip = ip.replace(/^::ffff:/, '');
+      if (isPrivateIP(ip)) {
+        logger.log('检测到内网IP，返回本地信息', { ip });
+        return getPrivateIPInfo(ip);
+      }
+      const cached = ipCache.get(ip);
+      if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+        logger.log('使用内存缓存的IP信息', { ip });
+        return cached.info;
+      }
+      const localInfo = getIPInfoFromLocal(ip);
+      if (localInfo) {
+        setIpCache(ip, { info: localInfo, timestamp: Date.now() });
+        logger.log('使用本地存储的IP信息', { ip });
+        return localInfo;
+      }
+      logger.log('开始查询外部API获取IP信息', { ip });
+      return await withConcurrencyLimit(async () => {
+        return await withRetry(async () => {
+          const info = await tryAllProviders(ip);
+          setIpCache(ip, { info, timestamp: Date.now() });
+          await saveIPInfoToLocal(info);
+          logger.log('成功获取IP信息', { ip, info });
+          return info;
+        });
+      });
+    } catch (error) {
+      lastError = error;
+      logger.error(`IP信息查询失败（第${attempt + 1}次），2秒后重试...`, { ip, error: error instanceof Error ? error.message : String(error) });
+      if (attempt < 2) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+  }
+  // 全部失败后兜底
+  logger.error('IP信息查询连续失败，返回默认信息', { ip, error: lastError instanceof Error ? lastError.message : String(lastError) });
+  return {
+    ip,
+    country: '未知',
+    region: '未知',
+    city: '未知',
+    isp: '未知'
+  };
 }
 
 export function isIPAllowed(ip: string): boolean {

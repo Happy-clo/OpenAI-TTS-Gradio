@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
+import { useNotification } from './Notification';
 
 const isTextExt = (ext: string) => ['.txt', '.log', '.json', '.md'].includes(ext);
 
@@ -24,15 +25,15 @@ const LogShare: React.FC = () => {
     const saved = localStorage.getItem('queryHistory');
     return saved ? JSON.parse(saved) : [];
   });
+  const { setNotification } = useNotification();
 
   useEffect(() => {
     if (uploadResult && uploadResult.link) {
       navigator.clipboard.writeText(uploadResult.link).then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+        setNotification({ message: '上传成功，链接已复制', type: 'success' });
       });
     }
-  }, [uploadResult]);
+  }, [uploadResult, setNotification]);
 
   // 上传日志/文件
   const handleUpload = async () => {
@@ -106,13 +107,14 @@ const LogShare: React.FC = () => {
     const { content, ext, encoding } = queryResult;
     let blob;
     if (encoding === 'base64') {
-      const byteString = atob(content);
-      const ab = new ArrayBuffer(byteString.length);
-      const ia = new Uint8Array(ab);
-      for (let i = 0; i < byteString.length; i++) {
-        ia[i] = byteString.charCodeAt(i);
+      // 修正：base64转Uint8Array再转Blob，避免undefined
+      const binaryString = atob(content);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
       }
-      blob = new Blob([ab]);
+      blob = new Blob([bytes]);
     } else {
       blob = new Blob([content], { type: 'text/plain' });
     }
@@ -125,6 +127,20 @@ const LogShare: React.FC = () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
+
+  useEffect(() => {
+    if (error) {
+      setNotification({ message: error, type: 'error' });
+      setError('');
+    }
+  }, [error, setNotification]);
+
+  useEffect(() => {
+    if (success) {
+      setNotification({ message: success, type: 'success' });
+      setSuccess('');
+    }
+  }, [success, setNotification]);
 
   return (
     <motion.div 
@@ -467,41 +483,7 @@ const LogShare: React.FC = () => {
       </motion.div>
       
       {/* 全局提示 */}
-      <AnimatePresence>
-        {error && (
-          <motion.div 
-            className="text-red-600 font-bold text-center mb-2 bg-red-50 border border-red-200 rounded-lg p-3"
-            initial={{ opacity: 0, scale: 0.95, y: -10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: -10 }}
-            transition={{ duration: 0.3 }}
-          >
-            <motion.i 
-              className="fas fa-exclamation-circle mr-2"
-              animate={{ rotate: [0, -10, 10, 0] }}
-              transition={{ duration: 0.5, repeat: 2 }}
-            />
-            {error}
-          </motion.div>
-        )}
-        {success && (
-          <motion.div 
-            className="text-green-600 font-bold text-center mb-2 bg-green-50 border border-green-200 rounded-lg p-3"
-            initial={{ opacity: 0, scale: 0.95, y: -10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: -10 }}
-            transition={{ duration: 0.3 }}
-          >
-            <motion.i 
-              className="fas fa-check-circle mr-2"
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              transition={{ type: "spring", stiffness: 300, delay: 0.1 }}
-            />
-            {success}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* 所有提示已用 setNotification 全局弹窗替换 */}
       
       <motion.div 
         className="mt-10"
