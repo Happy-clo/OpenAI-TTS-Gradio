@@ -41,6 +41,7 @@ import dataProcessRoutes from './routes/dataProcessRoutes';
 import mediaRoutes from './routes/mediaRoutes';
 import socialRoutes from './routes/socialRoutes';
 import lifeRoutes from './routes/lifeRoutes';
+import lotteryRoutes from './routes/lotteryRoutes';
 import { PasskeyDataRepairService } from './services/passkeyDataRepairService';
 
 // 扩展 Request 类型
@@ -601,6 +602,7 @@ app.use('/api/data', dataProcessRoutes);
 app.use('/api/media', mediaRoutes);
 app.use('/api/social', socialRoutes);
 app.use('/api/life', lifeRoutes);
+app.use('/api/lottery', lotteryRoutes);
 app.use('/api', logRoutes);
 app.use('/api/passkey', passkeyAutoFixMiddleware);
 app.use('/api/passkey', passkeyRoutes);

@@ -74,6 +74,17 @@ const MobileNav: React.FC<MobileNavProps> = ({
             API 文档
           </Link>
         </motion.div>
+        <motion.div
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+        >
+          <Link 
+            to="/lottery" 
+            className="px-4 py-2 rounded-lg bg-green-100 text-green-700 font-semibold hover:bg-green-200 transition-all duration-200 shadow-sm hover:shadow-md"
+          >
+            抽奖系统
+          </Link>
+        </motion.div>
         {user?.role === 'admin' && (
           <motion.div
             whileHover={{ scale: 1.05 }}

@@ -9,6 +9,8 @@ import Footer from './components/Footer';
 import PublicIP from './components/PublicIP';
 import UserManagement from './components/UserManagement';
 import TOTPManager from './components/TOTPManager';
+import { LotteryPage } from './components/LotteryPage';
+import { LotteryAdmin } from './components/LotteryAdmin';
 import { TOTPStatus } from './types/auth';
 import MobileNav from './components/MobileNav';
 import ApiDocs from './components/ApiDocs';
@@ -501,6 +503,32 @@ const App: React.FC = () => {
                   transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
                 >
                   <UserManagement />
+                </motion.div>
+              ) : (
+                <Navigate to="/" replace />
+              )
+            } />
+            <Route path="/lottery" element={
+              <motion.div
+                variants={pageVariants}
+                initial="initial"
+                animate="in"
+                exit="out"
+                transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
+              >
+                <LotteryPage />
+              </motion.div>
+            } />
+            <Route path="/lottery-admin" element={
+              user?.role === 'admin' ? (
+                <motion.div
+                  variants={pageVariants}
+                  initial="initial"
+                  animate="in"
+                  exit="out"
+                  transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
+                >
+                  <LotteryAdmin />
                 </motion.div>
               ) : (
                 <Navigate to="/" replace />
