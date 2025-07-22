@@ -4,11 +4,20 @@ import { useAuth } from '../hooks/useAuth';
 import { useLottery } from '../hooks/useLottery';
 import { LotteryPrize, LotteryRound } from '../types/lottery';
 import * as lotteryApi from '../api/lottery';
-import { toast } from 'react-toastify';
+import { useNotification } from './Notification';
 import { AnimatePresence } from 'framer-motion';
+import { deleteAllRounds } from '../api/lottery';
+
+// 获取 API 基础地址（适配本地/生产环境）
+const getApiBaseUrl = () => {
+  if (import.meta.env.DEV) return '';
+  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
+  return 'https://tts-api.hapxs.com';
+};
 
 // 创建轮次表单组件
 const CreateRoundForm: React.FC<{ onSuccess: () => void }> = ({ onSuccess }) => {
+  const { setNotification } = useNotification();
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -54,24 +63,32 @@ const CreateRoundForm: React.FC<{ onSuccess: () => void }> = ({ onSuccess }) => 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (formData.prizes.length === 0) {
-      toast.error('请至少添加一个奖品');
+      setNotification({ message: '请至少添加一个奖品', type: 'error' });
       return;
     }
 
     setLoading(true);
     try {
-      await lotteryApi.createLotteryRound(formData);
-      toast.success('抽奖轮次创建成功');
-      setFormData({
-        name: '',
-        description: '',
-        startTime: '',
-        endTime: '',
-        prizes: []
-      });
+      const resp = await lotteryApi.createLotteryRound(formData);
+      setNotification({ message: '抽奖轮次创建成功', type: 'success' });
+      if (resp && (resp as any).warning) {
+        setNotification({ message: `后端已自动修正部分数据：${(resp as any).warning}`, type: 'warning' });
+      }
+      // 新增：弹窗询问是否保留表单
+      if (window.confirm('抽奖轮次创建成功，是否保留当前表单内容？\n选择“确定”保留，选择“取消”清空表单。')) {
+        // 保留表单内容
+      } else {
+        setFormData({
+          name: '',
+          description: '',
+          startTime: '',
+          endTime: '',
+          prizes: []
+        });
+      }
       onSuccess();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '创建失败');
+      setNotification({ message: error instanceof Error ? error.message : '创建失败', type: 'error' });
     } finally {
       setLoading(false);
     }
@@ -257,7 +274,11 @@ const CreateRoundForm: React.FC<{ onSuccess: () => void }> = ({ onSuccess }) => 
 
 // 轮次管理组件
 const RoundManagement: React.FC<{ rounds: LotteryRound[]; onRefresh: () => void }> = ({ rounds, onRefresh }) => {
+  const { setNotification } = useNotification();
   const [loading, setLoading] = useState<string | null>(null);
+
+  // 防御性处理，确保 rounds 一定为数组
+  const safeRounds = Array.isArray(rounds) ? rounds : [];
 
   const handleResetRound = async (roundId: string) => {
     if (!confirm('确定要重置这个轮次吗？这将清空所有参与者和获奖者记录。')) {
@@ -267,10 +288,10 @@ const RoundManagement: React.FC<{ rounds: LotteryRound[]; onRefresh: () => void 
     setLoading(roundId);
     try {
       await lotteryApi.resetRound(roundId);
-      toast.success('轮次重置成功');
+      setNotification({ message: '轮次重置成功', type: 'success' });
       onRefresh();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '重置失败');
+      setNotification({ message: error instanceof Error ? error.message : '重置失败', type: 'error' });
     } finally {
       setLoading(null);
     }
@@ -280,10 +301,10 @@ const RoundManagement: React.FC<{ rounds: LotteryRound[]; onRefresh: () => void 
     setLoading(roundId);
     try {
       await lotteryApi.updateRoundStatus(roundId, !isActive);
-      toast.success('状态更新成功');
+      setNotification({ message: '状态更新成功', type: 'success' });
       onRefresh();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '更新失败');
+      setNotification({ message: error instanceof Error ? error.message : '更新失败', type: 'error' });
     } finally {
       setLoading(null);
     }
@@ -298,7 +319,7 @@ const RoundManagement: React.FC<{ rounds: LotteryRound[]; onRefresh: () => void 
       <h3 className="text-xl font-bold text-gray-800 mb-4">轮次管理</h3>
       
       <div className="space-y-4">
-        {rounds.map((round) => (
+        {safeRounds.map((round) => (
           <div key={round.id} className="border border-gray-200 rounded-lg p-4">
             <div className="flex justify-between items-start mb-3">
               <div>
@@ -338,7 +359,7 @@ const RoundManagement: React.FC<{ rounds: LotteryRound[]; onRefresh: () => void 
           </div>
         ))}
         
-        {rounds.length === 0 && (
+        {safeRounds.length === 0 && (
           <div className="text-center text-gray-500 py-8">
             暂无抽奖轮次
           </div>
@@ -353,6 +374,7 @@ const LotteryAdmin: React.FC = () => {
   const { user } = useAuth();
   const { allRounds, fetchAllRounds } = useLottery();
   const [activeTab, setActiveTab] = useState<'create' | 'manage'>('create');
+  const { setNotification } = useNotification();
 
   // 检查管理员权限
   if (user?.role !== 'admin') {
@@ -367,6 +389,18 @@ const LotteryAdmin: React.FC = () => {
     );
   }
 
+  // 新增：一键删除所有轮次
+  const handleDeleteAllRounds = async () => {
+    if (!window.confirm('确定要删除所有抽奖轮次吗？此操作不可恢复！')) return;
+    try {
+      await deleteAllRounds();
+      setNotification({ message: '所有轮次已删除', type: 'success' });
+      fetchAllRounds();
+    } catch (err: any) {
+      setNotification({ message: err?.message || '删除失败', type: 'error' });
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-4">
       <div className="max-w-6xl mx-auto space-y-6">
@@ -379,6 +413,18 @@ const LotteryAdmin: React.FC = () => {
           <h1 className="text-4xl font-bold text-gray-800 mb-2">抽奖管理</h1>
           <p className="text-gray-600">管理抽奖轮次和奖品</p>
         </motion.div>
+
+        {/* 新增：一键删除所有轮次按钮，仅在管理页显示 */}
+        {activeTab === 'manage' && (
+          <div className="flex justify-end">
+            <button
+              onClick={handleDeleteAllRounds}
+              className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded shadow transition-all"
+            >
+              删除所有轮次
+            </button>
+          </div>
+        )}
 
         {/* 标签页切换 */}
         <div className="flex justify-center">

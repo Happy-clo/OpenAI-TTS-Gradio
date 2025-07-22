@@ -110,9 +110,9 @@ export const useAuth = () => {
                 setUser(data);
                 if (data.role === 'admin' && !isAdminCheckedRef.current) {
                     setIsAdminChecked(true);
-                    // 排除特定路径，避免管理员访问这些页面时被重定向
+                    // 只在访问根路径/时才重定向到首页，其他页面不跳转
                     const excludedPaths = ['/policy', '/welcome', '/admin/users'];
-                    if (locationPathRef.current !== '/' && !excludedPaths.includes(locationPathRef.current)) {
+                    if (locationPathRef.current === '/' && !excludedPaths.includes(locationPathRef.current)) {
                         navigate('/', { replace: true });
                     }
                 }
@@ -145,17 +145,10 @@ export const useAuth = () => {
         }
     }, []); // 移除所有依赖项，使用ref来避免闭包问题
 
-    // 使用useEffect来定期检查认证状态
+    // 只在页面刷新（首次挂载）时检查一次
     useEffect(() => {
-        // 初始检查
         checkAuth();
-        
-        const interval = setInterval(() => {
-            checkAuth();
-        }, CHECK_INTERVAL);
-        
-        return () => clearInterval(interval);
-    }, []); // 移除checkAuth依赖项，避免重复触发
+    }, []);
 
     const login = async (username: string, password: string) => {
         try {

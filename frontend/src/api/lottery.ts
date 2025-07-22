@@ -7,6 +7,7 @@ import {
   LotteryApiResponse 
 } from '../types/lottery';
 
+// 修正API_BASE，确保所有请求都指向 /api/lottery
 const API_BASE = '/api/lottery';
 
 // 通用API请求函数
@@ -18,10 +19,24 @@ async function apiRequest<T>(endpoint: string, options?: RequestInit): Promise<T
     ...options?.headers,
   };
 
-  const response = await fetch(`${API_BASE}${endpoint}`, {
+  // 修正：如果 endpoint 不是以 / 开头，自动补/
+  const url = endpoint.startsWith('/') ? `${API_BASE}${endpoint}` : `${API_BASE}/${endpoint}`;
+
+  // 调试日志
+  if (typeof window !== 'undefined') {
+    console.log('[lottery-api] fetch', url, options);
+  }
+
+  const response = await fetch(url, {
     ...options,
     headers,
   });
+
+  // 新增：检查响应类型，防止解析 HTML
+  const contentType = response.headers.get('content-type');
+  if (!contentType || !contentType.includes('application/json')) {
+    throw new Error('后端未返回 JSON，可能是 404、未部署 lottery API 或服务器错误');
+  }
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
@@ -86,6 +101,7 @@ export async function createLotteryRound(roundData: {
   endTime: string;
   prizes: any[];
 }): Promise<LotteryRound> {
+  console.log('收到创建轮次请求', roundData);
   return apiRequest<LotteryRound>('/rounds', {
     method: 'POST',
     body: JSON.stringify(roundData),
@@ -105,4 +121,11 @@ export async function resetRound(roundId: string): Promise<void> {
   return apiRequest<void>(`/rounds/${roundId}/reset`, {
     method: 'POST',
   });
-} 
+}
+
+// 删除所有抽奖轮次（管理员）
+export async function deleteAllRounds(): Promise<void> {
+  return apiRequest<void>('/rounds', {
+    method: 'DELETE',
+  });
+}
