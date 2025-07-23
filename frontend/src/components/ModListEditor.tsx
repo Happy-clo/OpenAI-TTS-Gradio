@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence, HTMLMotionProps } from 'framer-motion';
 import { useNotification } from './Notification';
+import getApiBaseUrl, { getApiBaseUrl as namedGetApiBaseUrl } from '../api';
 
 // Mod 类型扩展
 interface Mod {
@@ -11,7 +12,7 @@ interface Mod {
 }
 
 const fetchMods = async (withHash = false, withMd5 = false) => {
-  let url = '/api/modlist';
+  let url = getApiBaseUrl() + '/api/modlist';
   const params = [];
   if (withHash) params.push('withHash=1');
   if (withMd5) params.push('withMd5=1');
@@ -21,7 +22,7 @@ const fetchMods = async (withHash = false, withMd5 = false) => {
 };
 
 const fetchModsJson = async (withHash = false, withMd5 = false) => {
-  let url = '/api/modlist/json';
+  let url = getApiBaseUrl() + '/api/modlist/json';
   const params = [];
   if (withHash) params.push('withHash=1');
   if (withMd5) params.push('withMd5=1');
@@ -31,7 +32,7 @@ const fetchModsJson = async (withHash = false, withMd5 = false) => {
 };
 
 const addMod = async (name: string, code: string, hash?: string, md5?: string) => {
-  const res = await fetch('/api/modlist', {
+  const res = await fetch(getApiBaseUrl() + '/api/modlist', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, code, hash, md5 })
@@ -40,7 +41,7 @@ const addMod = async (name: string, code: string, hash?: string, md5?: string) =
 };
 
 const updateMod = async (id: string, name: string, code: string) => {
-  const res = await fetch(`/api/modlist/${id}`, {
+  const res = await fetch(getApiBaseUrl() + `/api/modlist/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, code })
@@ -49,12 +50,12 @@ const updateMod = async (id: string, name: string, code: string) => {
 };
 
 const deleteMod = async (id: string) => {
-  const res = await fetch(`/api/modlist/${id}`, { method: 'DELETE' });
+  const res = await fetch(getApiBaseUrl() + `/api/modlist/${id}`, { method: 'DELETE' });
   return await res.json();
 };
 
 const batchAddMods = async (mods: Mod[]) => {
-  const res = await fetch('/api/modlist/batch-add', {
+  const res = await fetch(getApiBaseUrl() + '/api/modlist/batch-add', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(mods)
@@ -63,7 +64,7 @@ const batchAddMods = async (mods: Mod[]) => {
 };
 
 const batchDeleteMods = async (ids: string[]) => {
-  const res = await fetch('/api/modlist/batch-delete', {
+  const res = await fetch(getApiBaseUrl() + '/api/modlist/batch-delete', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(ids)
