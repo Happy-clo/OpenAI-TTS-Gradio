@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Link, useLocation } from 'react-router-dom';
 import { User } from '../types/auth';
 import ReactDOM from 'react-dom';
 import { useTwoFactorStatus } from '../hooks/useTwoFactorStatus';
+import getApiBaseUrl from '../api';
+import { openDB } from 'idb';
 
 interface MobileNavProps {
   user: User | null;
@@ -24,6 +26,39 @@ const MobileNav: React.FC<MobileNavProps> = ({
   const [isOverflow, setIsOverflow] = useState(false);
   const location = useLocation();
   const twoFactorStatus = useTwoFactorStatus();
+  const [hasAvatar, setHasAvatar] = useState<boolean>(false);
+  const [avatarImg, setAvatarImg] = useState<string | undefined>(undefined);
+  const lastAvatarUrl = useRef<string | undefined>(undefined);
+  const lastObjectUrl = useRef<string | undefined>(undefined);
+  // 1. 在 useEffect 里获取 profile 时，保存 avatarHash 到 state
+  const [avatarHash, setAvatarHash] = useState<string | undefined>(undefined);
+
+  const AVATAR_DB = 'avatar-store';
+  const AVATAR_STORE = 'avatars';
+
+  async function getCachedAvatar(userId: string, avatarUrl: string): Promise<string | undefined> {
+    const db = await openDB(AVATAR_DB, 1, {
+      upgrade(db) {
+        if (!db.objectStoreNames.contains(AVATAR_STORE)) {
+          db.createObjectStore(AVATAR_STORE);
+        }
+      },
+    });
+    const key = `${userId}:${avatarUrl}`;
+    return await db.get(AVATAR_STORE, key);
+  }
+
+  async function setCachedAvatar(userId: string, avatarUrl: string, blobUrl: string) {
+    const db = await openDB(AVATAR_DB, 1, {
+      upgrade(db) {
+        if (!db.objectStoreNames.contains(AVATAR_STORE)) {
+          db.createObjectStore(AVATAR_STORE);
+        }
+      },
+    });
+    const key = `${userId}:${avatarUrl}`;
+    await db.put(AVATAR_STORE, blobUrl, key);
+  }
 
   // 检测是否为移动设备或溢出
   useEffect(() => {
@@ -58,6 +93,71 @@ const MobileNav: React.FC<MobileNavProps> = ({
   useEffect(() => {
     setIsMenuOpen(false);
   }, [location.pathname]);
+
+  useEffect(() => {
+    if (user) {
+      fetch(getApiBaseUrl() + '/api/admin/user/avatar/exist', {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      })
+        .then(res => res.json())
+        .then(data => setHasAvatar(!!data.hasAvatar))
+        .catch(() => setHasAvatar(false));
+    }
+  }, [user]);
+
+  // 1. 在 useEffect 里获取 profile 时，保存 avatarHash 到 state
+  useEffect(() => {
+    if (user) {
+      fetch(getApiBaseUrl() + '/api/admin/user/profile', {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      })
+        .then(res => res.json())
+        .then(data => setAvatarHash(data.avatarHash))
+        .catch(() => setAvatarHash(undefined));
+    }
+  }, [user]);
+
+  // 2. 缓存key用 user.id:avatarHash
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAvatar() {
+      if (hasAvatar && typeof user?.avatarUrl === 'string' && typeof user?.id === 'string' && typeof avatarHash === 'string') {
+        if (lastAvatarUrl.current === avatarHash && avatarImg) {
+          return;
+        }
+        // 先查IndexedDB
+        const cached = await getCachedAvatar(user.id as string, avatarHash as string);
+        if (cached) {
+          setAvatarImg(cached);
+          lastAvatarUrl.current = avatarHash;
+          return;
+        }
+        // 下载图片
+        fetch(user.avatarUrl)
+          .then(res => res.blob())
+          .then(async blob => {
+            if (cancelled) return;
+            const url = URL.createObjectURL(blob);
+            setAvatarImg(url);
+            lastAvatarUrl.current = avatarHash;
+            lastObjectUrl.current = url;
+            await setCachedAvatar(user.id as string, avatarHash as string, url);
+          })
+          .catch(() => setAvatarImg(undefined));
+      } else {
+        setAvatarImg(undefined);
+        lastAvatarUrl.current = undefined;
+      }
+    }
+    loadAvatar();
+    return () => {
+      cancelled = true;
+      if (lastObjectUrl.current) {
+        URL.revokeObjectURL(lastObjectUrl.current);
+        lastObjectUrl.current = undefined;
+      }
+    };
+  }, [hasAvatar, user?.avatarUrl, user?.id, avatarHash]);
 
   const toggleMenu = () => {
     setIsMenuOpen(!isMenuOpen);
@@ -396,17 +496,26 @@ const MobileNav: React.FC<MobileNavProps> = ({
                   transition={{ duration: 0.5, delay: 0.2, type: "spring", stiffness: 200 }}
                   whileHover={{ scale: 1.1, rotate: 5 }}
                 >
-                  <motion.svg 
-                    className="w-6 h-6 text-white drop-shadow" 
-                    fill="none" 
-                    stroke="currentColor" 
-                    viewBox="0 0 24 24"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ duration: 0.3, delay: 0.4 }}
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                  </motion.svg>
+                  {hasAvatar && avatarImg ? (
+                    <img
+                      src={avatarImg}
+                      alt="头像"
+                      className="w-full h-full object-cover rounded-full"
+                      onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                    />
+                  ) : (
+                    <motion.svg 
+                      className="w-6 h-6 text-white drop-shadow" 
+                      fill="none" 
+                      stroke="currentColor" 
+                      viewBox="0 0 24 24"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      transition={{ duration: 0.3, delay: 0.4 }}
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </motion.svg>
+                  )}
                 </motion.div>
                 <motion.div
                   initial={{ opacity: 0, x: -10 }}

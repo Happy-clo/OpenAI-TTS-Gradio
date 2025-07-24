@@ -1,15 +1,16 @@
-import React, { useEffect, useState, ChangeEvent } from 'react';
+import React, { useEffect, useState, ChangeEvent, useRef } from 'react';
 import { useNotification } from './Notification';
 import { motion } from 'framer-motion';
 import VerifyCodeInput from './VerifyCodeInput';
 import { LoadingSpinner } from './LoadingSpinner';
 import getApiBaseUrl, { getApiBaseUrl as namedGetApiBaseUrl } from '../api';
+import { openDB } from 'idb';
 
 interface UserProfileData {
   id: string;
   username: string;
   email: string;
-  avatarBase64?: string;
+  avatarUrl?: string; // 新增avatarUrl字段
   role?: string;
 }
 
@@ -58,6 +59,33 @@ const verifyUser = async (verificationCode: string) => {
   return result;
 };
 
+const AVATAR_DB = 'avatar-store';
+const AVATAR_STORE = 'avatars';
+
+async function getCachedAvatar(userId: string, avatarHash: string): Promise<string | undefined> {
+  const db = await openDB(AVATAR_DB, 1, {
+    upgrade(db) {
+      if (!db.objectStoreNames.contains(AVATAR_STORE)) {
+        db.createObjectStore(AVATAR_STORE);
+      }
+    },
+  });
+  const key = `${userId}:${avatarHash}`;
+  return await db.get(AVATAR_STORE, key);
+}
+
+async function setCachedAvatar(userId: string, avatarHash: string, blobUrl: string) {
+  const db = await openDB(AVATAR_DB, 1, {
+    upgrade(db) {
+      if (!db.objectStoreNames.contains(AVATAR_STORE)) {
+        db.createObjectStore(AVATAR_STORE);
+      }
+    },
+  });
+  const key = `${userId}:${avatarHash}`;
+  await db.put(AVATAR_STORE, blobUrl, key);
+}
+
 const UserProfile: React.FC = () => {
   const { setNotification } = useNotification();
   const [profile, setProfile] = useState<UserProfileData | null>(null);
@@ -66,7 +94,6 @@ const UserProfile: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [avatarBase64, setAvatarBase64] = useState<string | undefined>('');
   const [verificationCode, setVerificationCode] = useState('');
   const [verified, setVerified] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -74,6 +101,12 @@ const UserProfile: React.FC = () => {
   const [changePwdMode, setChangePwdMode] = useState(false);
   const [oldPwd, setOldPwd] = useState('');
   const [newPwd, setNewPwd] = useState('');
+  // 上传头像后本地预览并暂存，保存时一并提交
+  const [pendingAvatar, setPendingAvatar] = useState<string | undefined>('');
+  const [avatarImg, setAvatarImg] = useState<string | undefined>(undefined);
+  const lastAvatarUrl = useRef<string | undefined>(undefined);
+  const lastObjectUrl = useRef<string | undefined>(undefined);
+  const [avatarHash, setAvatarHash] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     let timeoutId: any = null;
@@ -83,14 +116,13 @@ const UserProfile: React.FC = () => {
     timeoutId = setTimeout(() => {
       setLoadTimeout(true);
       setLoading(false);
-    }, 5000); // 5秒超时
+    }, 7500); // 7.5秒超时
     fetchProfile().then((data) => {
       clearTimeout(timeoutId);
       setLoading(false);
       if (data) {
         setProfile(data);
         setEmail(data.email);
-        setAvatarBase64(data.avatarBase64);
       } else {
         setLoadError('加载失败，请刷新页面或重新登录');
       }
@@ -119,14 +151,120 @@ const UserProfile: React.FC = () => {
     fetchStatus();
   }, []);
 
-  const handleAvatarChange = (e: ChangeEvent<HTMLInputElement>) => {
+  // 登录/认证成功后自动刷新用户信息
+  useEffect(() => {
+    if (verified) {
+      fetchProfile().then((data) => {
+        if (data) {
+          setProfile(data);
+          setEmail(data.email);
+        }
+      });
+    }
+  }, [verified]);
+
+  // 在 useEffect 里获取 profile 时，保存 avatarHash 到 state
+  useEffect(() => {
+    if (profile?.id) {
+      fetch(getApiBaseUrl() + '/api/admin/user/profile', {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      })
+        .then(res => res.json())
+        .then(data => setAvatarHash(data.avatarHash))
+        .catch(() => setAvatarHash(undefined));
+    }
+  }, [profile?.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAvatar() {
+      if (typeof profile?.avatarUrl === 'string' && typeof profile?.id === 'string' && typeof avatarHash === 'string') {
+        if (lastAvatarUrl.current === avatarHash && avatarImg) {
+          return;
+        }
+        // 先查IndexedDB
+        const cached = await getCachedAvatar(profile.id as string, avatarHash as string);
+        if (cached) {
+          setAvatarImg(cached);
+          lastAvatarUrl.current = avatarHash;
+          return;
+        }
+        // 下载图片
+        fetch(profile.avatarUrl)
+          .then(res => res.blob())
+          .then(async blob => {
+            if (cancelled) return;
+            const url = URL.createObjectURL(blob);
+            setAvatarImg(url);
+            lastAvatarUrl.current = avatarHash;
+            lastObjectUrl.current = url;
+            await setCachedAvatar(profile.id as string, avatarHash as string, url);
+          })
+          .catch(() => setAvatarImg(undefined));
+      } else {
+        setAvatarImg(undefined);
+        lastAvatarUrl.current = undefined;
+      }
+    }
+    loadAvatar();
+    return () => {
+      cancelled = true;
+      if (lastObjectUrl.current) {
+        URL.revokeObjectURL(lastObjectUrl.current);
+        lastObjectUrl.current = undefined;
+      }
+    };
+  }, [profile?.avatarUrl, profile?.id, avatarHash]);
+
+  // 新增头像上传限制
+  const MAX_AVATAR_SIZE = 2 * 1024 * 1024; // 2MB
+  const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+
+  // 优化头像上传逻辑
+  const handleAvatarChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      setAvatarBase64(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    const formData = new FormData();
+    formData.append('avatar', file);
+    setLoading(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(getApiBaseUrl() + '/api/admin/user/avatar', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      } as any);
+      const result = await res.json();
+      setLoading(false);
+      if (result.success && result.avatarUrl) {
+        setProfile((p) => p ? { ...p, avatarUrl: result.avatarUrl } : p);
+        setNotification({ message: '头像上传成功', type: 'success' });
+      } else {
+        setNotification({ message: result.error || '头像上传失败', type: 'error' });
+      }
+    } catch (err) {
+      setLoading(false);
+      setNotification({ message: '头像上传失败，图床服务不可用或网络异常，请稍后重试。', type: 'error' });
+    }
+  };
+
+  // 头像渲染兜底组件
+  const Avatar = ({ src }: { src?: string }) => {
+    const [error, setError] = useState(false);
+    if (!src || error) {
+      return (
+        <span className="text-4xl text-gray-400 flex items-center justify-center h-full">👤</span>
+      );
+    }
+    return (
+      <img
+        src={src}
+        alt="头像"
+        className="w-full h-full object-cover"
+        onError={() => setError(true)}
+        style={{ borderRadius: '50%' }}
+      />
+    );
   };
 
   const handleVerify = async () => {
@@ -145,15 +283,14 @@ const UserProfile: React.FC = () => {
     }
   };
 
+  // 头像上传后只本地setAvatarBase64，保存profile时不再传avatarBase64，避免超大json
   const handleUpdate = async () => {
     if (totpStatus && !totpStatus.enabled && !totpStatus.hasPasskey) {
-      // 只需密码校验
       if (!password) {
         setNotification({ message: '请输入当前密码', type: 'warning' });
         return;
       }
     } else {
-      // 需要二次认证
       if (!verified) {
         setNotification({ message: '请先通过二次验证', type: 'warning' });
         return;
@@ -164,7 +301,7 @@ const UserProfile: React.FC = () => {
       email,
       password: totpStatus && !totpStatus.enabled && !totpStatus.hasPasskey ? password : undefined,
       newPassword: newPassword || undefined,
-      avatarBase64,
+      avatarUrl: pendingAvatar || undefined,
       verificationCode: totpStatus && (totpStatus.enabled || totpStatus.hasPasskey) ? verificationCode : undefined,
     });
     setLoading(false);
@@ -172,7 +309,13 @@ const UserProfile: React.FC = () => {
       setNotification({ message: res.error, type: 'error' });
     } else {
       setNotification({ message: '信息修改成功', type: 'success' });
-      setProfile(res);
+      // 修改成功后重新拉取后端最新profile，确保头像等最新
+      const latest = await fetchProfile();
+      if (latest) {
+        setProfile(latest);
+        setEmail(latest.email);
+        setPendingAvatar('');
+      }
       setPassword('');
       setNewPassword('');
       setVerified(false);
@@ -246,13 +389,15 @@ const UserProfile: React.FC = () => {
           whileHover={{ scale: 1.05, rotate: 2 }}
           whileTap={{ scale: 0.97, rotate: -2 }}
         >
-          {avatarBase64 ? (
-            <img src={avatarBase64} alt="头像" className="w-full h-full object-cover" />
-          ) : (
-            <span className="text-4xl text-gray-400 flex items-center justify-center h-full">👤</span>
-          )}
+          <Avatar src={avatarImg || profile?.avatarUrl} />
         </motion.div>
-        <input type="file" accept="image/*" onChange={handleAvatarChange} className="mb-2" />
+        <input
+          type="file"
+          accept="image/*"
+          onChange={handleAvatarChange}
+          className="mb-2"
+          disabled={loading}
+        />
         <div className="text-lg font-semibold">{profile.username}</div>
         <div className="text-gray-500 text-sm">{profile.role === 'admin' ? '管理员' : '普通用户'}</div>
       </motion.div>

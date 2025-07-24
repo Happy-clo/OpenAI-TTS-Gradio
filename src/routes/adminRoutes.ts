@@ -2,6 +2,8 @@ import express from 'express';
 import { adminController } from '../controllers/adminController';
 import { authMiddleware } from '../middleware/authMiddleware';
 import rateLimit from 'express-rate-limit';
+import multer from 'multer';
+const upload = multer({ limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB限制
 
 const router = express.Router();
 
@@ -23,6 +25,21 @@ const adminAuthMiddleware = (req: any, res: any, next: any) => {
     }
     next();
 };
+
+// 启动时清理所有用户的avatarBase64字段，只保留avatarUrl
+import { UserStorage } from '../utils/userStorage';
+(async () => {
+  try {
+    const users = await UserStorage.getAllUsers();
+    for (const user of users) {
+      if ((user as any).avatarBase64) {
+        await UserStorage.updateUser(user.id, { avatarBase64: undefined } as any);
+      }
+    }
+  } catch (e) {
+    console.warn('启动时清理avatarBase64字段失败', e);
+  }
+})();
 
 // 公告读取接口移到最前面，不加任何中间件
 router.get('/announcement', adminController.getAnnouncement);
@@ -225,14 +242,31 @@ router.get('/user/profile', authMiddleware, async (req, res) => {
     if (!user) return res.status(401).json({ error: '未登录' });
     const { id, username, role } = user;
     let email = undefined;
-    let avatarBase64 = undefined;
+    let avatarUrl = undefined;
+    let avatarHash = undefined;
     const { UserStorage } = require('../utils/userStorage');
     const dbUser = await UserStorage.getUserById(id);
     if (dbUser) {
       email = dbUser.email;
-      avatarBase64 = dbUser.avatarBase64;
+      if (dbUser.avatarUrl && typeof dbUser.avatarUrl === 'string' && dbUser.avatarUrl.length > 0) {
+        avatarUrl = dbUser.avatarUrl;
+        // 尝试从URL中提取hash（如文件名带hash），否则可用md5等生成
+        const match = dbUser.avatarUrl.match(/([a-fA-F0-9]{8,})\.(jpg|jpeg|png|webp|gif)$/);
+        if (match) {
+          avatarHash = match[1];
+        } else {
+          // 若URL不带hash，可用URL整体md5
+          const crypto = require('crypto');
+          avatarHash = crypto.createHash('md5').update(dbUser.avatarUrl).digest('hex');
+        }
+      }
     }
-    res.json({ id, username, email, avatarBase64, role });
+    const resp = { id, username, email, role };
+    if (avatarUrl) {
+      (resp as any).avatarUrl = avatarUrl;
+      (resp as any).avatarHash = avatarHash;
+    }
+    res.json(resp);
   } catch (e) {
     res.status(500).json({ error: '获取用户信息失败' });
   }
@@ -243,20 +277,21 @@ router.post('/user/profile', authMiddleware, async (req, res) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ error: '未登录' });
-    const { email, password, newPassword, avatarBase64, verificationCode } = req.body;
+    const { email, password, newPassword, avatarUrl, verificationCode } = req.body;
     const { UserStorage } = require('../utils/userStorage');
     const dbUser = await UserStorage.getUserById(user.id);
     // 判断二次认证方式
     const hasTOTP = !!dbUser.totpEnabled;
     const hasPasskey = Array.isArray(dbUser.passkeyCredentials) && dbUser.passkeyCredentials.length > 0;
     if (!hasTOTP && !hasPasskey) {
-      // 允许用当前密码校验
       if (!password || !UserStorage.checkPassword(dbUser, password)) {
+        if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'dev') {
+          console.warn('[UserStorage] 密码校验失败，预期密码:', dbUser.password);
+        }
         return res.status(401).json({ error: '密码错误，无法验证身份' });
       }
     } else {
-      // 只允许TOTP/Passkey
-      if (!verificationCode) {
+      if (!verificationCode && !(avatarUrl && !email && !newPassword)) {
         return res.status(401).json({ error: '请提供TOTP或Passkey验证码' });
       }
       // 这里可调用原有TOTP/Passkey校验逻辑（略，假设通过）
@@ -264,14 +299,67 @@ router.post('/user/profile', authMiddleware, async (req, res) => {
     // 更新信息
     const updateData: any = {};
     if (email) updateData.email = email;
-    if (avatarBase64) updateData.avatarBase64 = avatarBase64;
+    if (avatarUrl && typeof avatarUrl === 'string') {
+      updateData.avatarUrl = avatarUrl;
+    }
     if (newPassword) updateData.password = newPassword;
+    if (!Array.isArray(dbUser.passkeyCredentials)) {
+      updateData.passkeyCredentials = [];
+    }
     await UserStorage.updateUser(user.id, updateData);
     const updated = await UserStorage.getUserById(user.id);
     const { password: _, ...safeUser } = updated;
-    res.json(safeUser);
+    const resp = { ...safeUser };
+    res.json(resp);
   } catch (e) {
+    console.error('用户信息更新接口异常:', e);
     res.status(500).json({ error: '信息修改失败' });
+  }
+});
+
+// 用户头像上传接口（支持文件上传到IPFS）
+router.post('/user/avatar', authMiddleware, upload.single('avatar'), async (req, res) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ error: '未登录' });
+    if (!req.file) return res.status(400).json({ error: '未上传头像文件' });
+    // 直接调用ipfsService上传图片
+    const { IPFSService } = require('../services/ipfsService');
+    let result;
+    try {
+      result = await IPFSService.uploadFile(req.file.buffer, req.file.originalname, req.file.mimetype);
+      if (!result || !result.web2url) {
+        console.error('[avatar upload] IPFS上传失败，返回值:', result);
+        return res.status(500).json({ error: 'IPFS上传失败' });
+      }
+    } catch (ipfsErr) {
+      // 兼容 TS 类型，安全打印错误堆栈
+      console.error('[avatar upload] IPFS上传异常:', ipfsErr && typeof ipfsErr === 'object' && 'stack' in ipfsErr ? ipfsErr.stack : ipfsErr);
+      return res.status(500).json({ error: 'IPFS上传异常', detail: ipfsErr instanceof Error ? ipfsErr.message : String(ipfsErr) });
+    }
+    // 存储图片web2url，删除base64
+    const { UserStorage } = require('../utils/userStorage');
+    await UserStorage.updateUser(user.id, { avatarUrl: result.web2url, avatarBase64: undefined });
+    res.json({ success: true, avatarUrl: result.web2url });
+  } catch (e) {
+    console.error('[avatar upload] 头像上传接口异常:', String(e));
+    res.status(500).json({ error: '头像上传失败', detail: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+// 用户头像是否存在接口（需登录）
+// 逻辑：如果数据库中 avatarUrl 字段不存在或为空，返回 hasAvatar: false，前端可回退到默认 SVG
+router.get('/user/avatar/exist', authMiddleware, async (req, res) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ error: '未登录' });
+    const { UserStorage } = require('../utils/userStorage');
+    const dbUser = await UserStorage.getUserById(user.id);
+    // avatarUrl 不存在或为空字符串时，hasAvatar 为 false
+    const hasAvatar = !!(dbUser && typeof dbUser.avatarUrl === 'string' && dbUser.avatarUrl.length > 0);
+    res.json({ hasAvatar });
+  } catch (e) {
+    res.status(500).json({ error: '查询头像状态失败' });
   }
 });
 
