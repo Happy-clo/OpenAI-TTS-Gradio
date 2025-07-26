@@ -71,6 +71,9 @@ var OUTEMAIL_SERVICE_STATUS: { available: boolean; error?: string };
 const app = express();
 const execAsync = promisify(exec);
 
+// 最高优先级，短链跳转
+app.use('/s', ipfsRoutes);
+
 // 设置信任代理 - 只信任第一个代理（安全）
 app.set('trust proxy', 1);
 
@@ -1064,11 +1067,11 @@ if (!process.env.RESEND_API_KEY) {
       const { EmailService } = require('./services/emailService');
       // 只检查配置，不发测试邮件
       (globalThis as any).EMAIL_SERVICE_STATUS = { available: true };
-      console.log('[邮件服务] 配置检查完成：已启用');
+      logger.info('[邮件服务] 配置检查完成：已启用');
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '未知错误';
       (globalThis as any).EMAIL_SERVICE_STATUS = { available: false, error: errorMessage };
-      console.warn('[邮件服务] 配置检查失败：', errorMessage);
+      logger.warn('[邮件服务] 配置检查失败：', errorMessage);
     }
   })();
   // 对外邮件服务同理
@@ -1077,26 +1080,26 @@ if (!process.env.RESEND_API_KEY) {
       const config = require('./config').default;
       if (!config.email?.outemail?.enabled) {
         (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: false, error: '对外邮件服务未启用' };
-        console.warn('[对外邮件服务] 服务未启用');
+        logger.warn('[对外邮件服务] 服务未启用');
         return;
       }
       if (!config.email?.outemail?.domain) {
         (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: false, error: '对外邮件服务未配置域名' };
-        console.warn('[对外邮件服务] 未配置域名');
+        logger.warn('[对外邮件服务] 未配置域名');
         return;
       }
       const key = config.email.outemail.apiKey;
       if (!key || !/^re_\w{8,}/.test(key)) {
         (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: false, error: '未配置有效的对外邮件API密钥（re_ 开头）' };
-        console.warn('[对外邮件服务] 未配置有效API密钥');
+        logger.warn('[对外邮件服务] 未配置有效API密钥');
         return;
       }
       (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: true };
-      console.log('[对外邮件服务] 配置检查完成：已启用');
+      logger.info('[对外邮件服务] 配置检查完成：已启用');
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '未知错误';
       (globalThis as any).OUTEMAIL_SERVICE_STATUS = { available: false, error: errorMessage };
-      console.warn('[对外邮件服务] 配置检查失败：', errorMessage);
+      logger.warn('[对外邮件服务] 配置检查失败：', errorMessage);
     }
   })();
 }
@@ -1252,12 +1255,12 @@ async function migrateTtsCollection() {
     const userDatasCol = db.collection('user_datas');
     const ttsCount = await ttsCol.countDocuments();
     if (ttsCount === 0) {
-      console.log('[迁移] tts 集合为空，无需迁移');
+      logger.info('[迁移] tts 集合为空，无需迁移');
       return;
     }
     const userDatasCount = await userDatasCol.countDocuments();
     if (userDatasCount >= ttsCount) {
-      console.log('[迁移] user_datas 集合已包含全部数据，无需迁移');
+      logger.info('[迁移] user_datas 集合已包含全部数据，无需迁移');
       return;
     }
     const docs = await ttsCol.find().toArray();
@@ -1294,46 +1297,83 @@ async function migrateTtsCollection() {
 migrateTtsCollection();
 
 // --- 全局WAF安全校验中间件 ---
-// const wafSkipMap = new Map<string, { last: number, count: number }>();
-// function wafCheckSimple(str: string, maxLen = 256): boolean {
-//   if (typeof str !== 'string') return false;
-//   if (!str.trim() || str.length > maxLen) return false;
-//   if (/[<>{}"'`;\\]/.test(str)) return false;
-//   if (/\b(select|update|delete|insert|drop|union|script|alert|onerror|onload)\b/i.test(str)) return false;
-//   return true;
-// }
-// app.use((req: Request, res: Response, next: NextFunction) => {
-//   // 只对 /api/ 路径做WAF，豁免 /api/auth/login 和 /api/auth/register
-//   if (!req.path.startsWith('/api/') || req.path === '/api/auth/login' || req.path === '/api/auth/register') return next();
-//   // 多请求时跳过WAF（如1秒内同IP超10次）
-//   const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
-//   const now = Date.now();
-//   const rec = wafSkipMap.get(ip) || { last: 0, count: 0 };
-//   if (now - rec.last < 1000) {
-//     rec.count++;
-//     if (rec.count > 10) {
-//       wafSkipMap.set(ip, { last: now, count: rec.count });
-//       return next(); // 跳过WAF 
-//     }
-//   } else {
-//     rec.count = 1;
-//     rec.last = now;
-//   }
-//   wafSkipMap.set(ip, rec);
-//   // 检查 query/body/params
-//   const checkObj = (obj: any) => {
-//     if (!obj) return true;
-//     for (const k in obj) {
-//       if (typeof obj[k] === 'string' && !wafCheckSimple(obj[k])) return false;
-//       if (typeof obj[k] === 'object' && obj[k] !== null) {
-//         if (!checkObj(obj[k])) return false;
-//       }
-//     }
-//     return true;
-//   };
-//   if (!checkObj(req.query) || !checkObj(req.body) || !checkObj(req.params)) {
-//     res.status(400).json({ error: '参数非法（WAF拦截）' });
-//     return;
-//   }
-//   next();
-// }); 
+const wafSkipMap = new Map<string, { last: number, count: number }>();
+function wafCheckSimple(str: string, maxLen = 256): boolean {
+  if (typeof str !== 'string') return false;
+  if (!str.trim() || str.length > maxLen) return false;
+  if (/[<>{}"'`;\\]/.test(str)) return false;
+  if (/\b(select|update|delete|insert|drop|union|script|alert|onerror|onload)\b/i.test(str)) return false;
+  return true;
+}
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (!req.path.startsWith('/api/') || req.path === '/api/auth/login' || req.path === '/api/auth/register') return next();
+  const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
+  const now = Date.now();
+  const rec = wafSkipMap.get(ip) || { last: 0, count: 0 };
+  if (now - rec.last < 1000) {
+    rec.count++;
+    if (rec.count > 10) {
+      wafSkipMap.set(ip, { last: now, count: rec.count });
+      return next();
+    }
+  } else {
+    rec.count = 1;
+    rec.last = now;
+  }
+  wafSkipMap.set(ip, rec);
+  // 异步参数检查，分片递归优化，避免大对象阻塞主线程
+  function checkObjAsync(obj: any, batchSize = 100): Promise<boolean> {
+    return new Promise((resolve) => {
+      const keys = Object.keys(obj || {});
+      let idx = 0;
+      function nextBatch() {
+        for (let i = 0; i < batchSize && idx < keys.length; i++, idx++) {
+          const k = keys[idx];
+          if (typeof obj[k] === 'string' && !wafCheckSimple(obj[k])) return resolve(false);
+          if (typeof obj[k] === 'object' && obj[k] !== null) {
+            checkObjAsync(obj[k], batchSize).then(ok => { if (!ok) resolve(false); });
+          }
+        }
+        if (idx < keys.length) {
+          setImmediate(nextBatch);
+        } else {
+          resolve(true);
+        }
+      }
+      nextBatch();
+    });
+  }
+  setImmediate(async () => {
+    try {
+      const [queryOk, bodyOk, paramsOk] = await Promise.all([
+        checkObjAsync(req.query),
+        checkObjAsync(req.body),
+        checkObjAsync(req.params)
+      ]);
+      if (!queryOk || !bodyOk || !paramsOk) {
+        res.status(400).json({ error: '参数非法（WAF拦截）' });
+        return;
+      }
+      next();
+    } catch {
+      res.status(400).json({ error: '参数非法（WAF拦截）' });
+    }
+  });
+}); 
+
+// 启动时异步修复短链表中无 userId/username 的数据
+(async () => {
+  try {
+    const mongoose = require('mongoose');
+    const ShortUrlModel = mongoose.models.ShortUrl || mongoose.model('ShortUrl');
+    const cursor = ShortUrlModel.find({ $or: [ { userId: { $exists: false } }, { username: { $exists: false } } ] }).cursor();
+    for await (const doc of cursor) {
+      await ShortUrlModel.updateOne({ _id: doc._id }, {
+        $set: { userId: 'admin', username: 'admin' }
+      });
+    }
+    logger.info('[ShortLink] 启动时已修复所有无用户信息的短链');
+  } catch (e) {
+    logger.warn('[ShortLink] 启动时修复短链用户信息失败', e);
+  }
+})(); 

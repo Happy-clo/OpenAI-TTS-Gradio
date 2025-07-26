@@ -9,6 +9,8 @@ import mongoose from 'mongoose';
 const ShortUrlSchema = new mongoose.Schema({
   code: { type: String, required: true, unique: true },
   target: { type: String, required: true },
+  userId: { type: String, default: 'admin' },
+  username: { type: String, default: 'admin' },
   createdAt: { type: Date, default: Date.now }
 }, { collection: 'short_urls' });
 const ShortUrlModel = mongoose.models.ShortUrl || mongoose.model('ShortUrl', ShortUrlSchema);
@@ -46,7 +48,7 @@ export class IPFSService {
         fileBuffer: Buffer,
         filename: string,
         mimetype: string,
-        options?: { shortLink?: boolean }
+        options?: { shortLink?: boolean; userId?: string; username?: string }
     ): Promise<IPFSUploadResponse> {
         const MAX_RETRIES = 2;
         let lastError: any = null;
@@ -94,7 +96,17 @@ export class IPFSService {
                   while (await ShortUrlModel.findOne({ code })) {
                     code = nanoid(6);
                   }
-                  await ShortUrlModel.create({ code, target: response.data.web2url });
+                  try {
+                    const doc = await ShortUrlModel.create({
+                      code,
+                      target: response.data.web2url,
+                      userId: options.userId || 'admin',
+                      username: options.username || 'admin'
+                    });
+                    logger.info('[ShortLink] 短链已写入数据库', { code, target: response.data.web2url, userId: options.userId, username: options.username, doc });
+                  } catch (err) {
+                    logger.error('[ShortLink] 短链写入数据库失败', { code, target: response.data.web2url, error: err });
+                  }
                   shortUrl = `${process.env.VITE_API_URL || process.env.BASE_URL || 'https://tts-api.hapxs.com'}/s/${code}`;
                 }
                 return { ...response.data, shortUrl };

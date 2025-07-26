@@ -5,6 +5,8 @@ import VerifyCodeInput from './VerifyCodeInput';
 import { LoadingSpinner } from './LoadingSpinner';
 import getApiBaseUrl, { getApiBaseUrl as namedGetApiBaseUrl } from '../api';
 import { openDB } from 'idb';
+import { usePasskey } from '../hooks/usePasskey';
+import { useAuth } from '../hooks/useAuth';
 
 interface UserProfileData {
   id: string;
@@ -88,6 +90,8 @@ async function setCachedAvatar(userId: string, avatarHash: string, blobUrl: stri
 
 const UserProfile: React.FC = () => {
   const { setNotification } = useNotification();
+  const { authenticateWithPasskey } = usePasskey();
+  // const { updateUserAvatar } = useAuth();
   const [profile, setProfile] = useState<UserProfileData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadTimeout, setLoadTimeout] = useState(false);
@@ -177,19 +181,26 @@ const UserProfile: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
+    let currentObjectUrl: string | undefined;
     async function loadAvatar() {
       if (typeof profile?.avatarUrl === 'string' && typeof profile?.id === 'string' && typeof avatarHash === 'string') {
         if (lastAvatarUrl.current === avatarHash && avatarImg) {
           return;
         }
-        // 先查IndexedDB
+        // 优先直接用远程URL（http/https），不再缓存blob到IndexedDB
+        if (/^https?:\/\//.test(profile.avatarUrl)) {
+          setAvatarImg(profile.avatarUrl);
+          lastAvatarUrl.current = avatarHash;
+          return;
+        }
+        // 兼容历史缓存逻辑：如果IndexedDB有blob，兜底用
         const cached = await getCachedAvatar(profile.id as string, avatarHash as string);
-        if (cached) {
+        if (cached && cached.startsWith('blob:')) {
           setAvatarImg(cached);
           lastAvatarUrl.current = avatarHash;
           return;
         }
-        // 下载图片
+        // 下载图片（极端兜底，理论上不会走到）
         fetch(profile.avatarUrl)
           .then(res => res.blob())
           .then(async blob => {
@@ -197,11 +208,19 @@ const UserProfile: React.FC = () => {
             const url = URL.createObjectURL(blob);
             setAvatarImg(url);
             lastAvatarUrl.current = avatarHash;
+            if (currentObjectUrl && currentObjectUrl.startsWith('blob:') && currentObjectUrl !== url) {
+              URL.revokeObjectURL(currentObjectUrl);
+            }
+            currentObjectUrl = url;
             lastObjectUrl.current = url;
-            await setCachedAvatar(profile.id as string, avatarHash as string, url);
+            // 不再setCachedAvatar，避免IndexedDB存blob
           })
           .catch(() => setAvatarImg(undefined));
       } else {
+        if (currentObjectUrl && currentObjectUrl.startsWith('blob:')) {
+          URL.revokeObjectURL(currentObjectUrl);
+          currentObjectUrl = undefined;
+        }
         setAvatarImg(undefined);
         lastAvatarUrl.current = undefined;
       }
@@ -209,9 +228,9 @@ const UserProfile: React.FC = () => {
     loadAvatar();
     return () => {
       cancelled = true;
-      if (lastObjectUrl.current) {
-        URL.revokeObjectURL(lastObjectUrl.current);
-        lastObjectUrl.current = undefined;
+      if (currentObjectUrl && currentObjectUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(currentObjectUrl);
+        currentObjectUrl = undefined;
       }
     };
   }, [profile?.avatarUrl, profile?.id, avatarHash]);
@@ -239,6 +258,20 @@ const UserProfile: React.FC = () => {
       if (result.success && result.avatarUrl) {
         setProfile((p) => p ? { ...p, avatarUrl: result.avatarUrl } : p);
         setNotification({ message: '头像上传成功', type: 'success' });
+        // 上传成功后立即刷新 avatarHash 并重新加载头像，确保本地缓存和页面同步
+        if (profile?.id) {
+          try {
+            console.log('[UserProfile] 上传头像后刷新avatarHash，用户ID:', profile.id);
+            const res = await fetch(getApiBaseUrl() + '/api/admin/user/profile', {
+              headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+            });
+            const data = await res.json();
+            console.log('[UserProfile] 获取到最新avatarHash:', data.avatarHash);
+            setAvatarHash(data.avatarHash);
+          } catch (err) {
+            console.warn('[UserProfile] 刷新avatarHash失败', err);
+          }
+        }
       } else {
         setNotification({ message: result.error || '头像上传失败', type: 'error' });
       }
@@ -267,20 +300,69 @@ const UserProfile: React.FC = () => {
     );
   };
 
+  // 验证方式选择
   const handleVerify = async () => {
-    if (!verificationCode) {
-      setNotification({ message: '请输入验证码', type: 'warning' });
+    if (totpStatus?.hasPasskey && !totpStatus?.enabled) {
+      // 只设置了Passkey，直接调用 usePasskey 验证
+      setLoading(true);
+      try {
+        const username = profile?.username;
+        if (!username) throw new Error('无法获取用户名');
+        const success = await authenticateWithPasskey(username);
+        setLoading(false);
+        if (success) {
+          setVerified(true);
+          setNotification({ message: 'Passkey 验证成功', type: 'success' });
+        } else {
+          setNotification({ message: 'Passkey 验证失败', type: 'error' });
+        }
+      } catch (e: any) {
+        setLoading(false);
+        setNotification({ message: e?.message || 'Passkey 验证失败', type: 'error' });
+      }
       return;
     }
-    setLoading(true);
-    const res = await verifyUser(verificationCode);
-    setLoading(false);
-    if (res.success) {
-      setVerified(true);
-      setNotification({ message: '验证成功，请继续修改', type: 'success' });
-    } else {
-      setNotification({ message: res.error || '验证失败', type: 'error' });
+    if (!totpStatus?.hasPasskey && totpStatus?.enabled) {
+      // 只设置了TOTP，直接调用 verifyUser
+      if (!verificationCode) {
+        setNotification({ message: '请输入验证码', type: 'warning' });
+        return;
+      }
+      setLoading(true);
+      const res = await verifyUser(verificationCode);
+      setLoading(false);
+      if (res.success) {
+        setVerified(true);
+        setNotification({ message: '验证成功，请继续修改', type: 'success' });
+      } else {
+        setNotification({ message: res.error || '验证失败', type: 'error' });
+      }
+      return;
     }
+    if (totpStatus?.hasPasskey && totpStatus?.enabled) {
+      // 两种都设置了，可扩展弹窗选择
+      setNotification({ message: '已同时设置 Passkey 和 TOTP，请在安全设置中选择验证方式。', type: 'info' });
+      // 可扩展弹窗选择逻辑
+      return;
+    }
+    // 新增：未设置任何二次认证方式时，校验当前密码
+    if (!totpStatus?.hasPasskey && !totpStatus?.enabled) {
+      if (!password) {
+        setNotification({ message: '请输入当前密码', type: 'warning' });
+        return;
+      }
+      setLoading(true);
+      const res = await updateProfile({ password });
+      setLoading(false);
+      if (res && !res.error) {
+        setVerified(true);
+        setNotification({ message: '密码验证成功，请继续修改', type: 'success' });
+      } else {
+        setNotification({ message: res?.error || '密码验证失败', type: 'error' });
+      }
+      return;
+    }
+    setNotification({ message: '未检测到二次验证方式', type: 'error' });
   };
 
   // 头像上传后只本地setAvatarBase64，保存profile时不再传avatarBase64，避免超大json

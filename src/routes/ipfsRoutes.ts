@@ -2,6 +2,9 @@ import express from 'express';
 import multer from 'multer';
 import { IPFSController } from '../controllers/ipfsController';
 import mongoose from 'mongoose';
+import logger from '../utils/logger';
+import { connectMongo } from '../services/mongoService';
+import rateLimit from 'express-rate-limit';
 
 const router = express.Router();
 
@@ -30,6 +33,26 @@ const upload = multer({
             cb(new Error('只支持图片文件格式：JPEG, PNG, GIF, WebP, BMP, SVG'));
         }
     }
+});
+
+// 图片上传限速：每IP每分钟最多10次
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: '上传过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip || (req.socket?.remoteAddress) || 'unknown',
+});
+
+// 短链跳转限速：每IP每分钟最多60次
+const shortlinkLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { error: '访问过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip || (req.socket?.remoteAddress) || 'unknown',
 });
 
 /**
@@ -105,16 +128,38 @@ const upload = multer({
  *                   type: string
  *                   description: 错误信息
  */
-router.post('/upload', upload.single('file'), IPFSController.uploadImage);
+router.post('/upload', uploadLimiter, upload.single('file'), IPFSController.uploadImage);
 
 // 短链跳转路由
-router.get('/s/:code', async (req, res) => {
+router.get('/:code', shortlinkLimiter, async (req, res) => {
   const code = req.params.code;
-  if (!code) return res.status(400).send('缺少短链码');
-  const ShortUrlModel = mongoose.models.ShortUrl || mongoose.model('ShortUrl');
-  const record = await ShortUrlModel.findOne({ code });
-  if (!record) return res.status(404).send('短链不存在');
-  res.redirect(record.target);
+  const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+  if (!code) {
+    logger.warn('[ShortLink] 缺少短链码', { ip, code });
+    return res.status(400).send('缺少短链码');
+  }
+  try {
+    // 强制确保数据库已连接
+    logger.info('[ShortLink] 检查数据库连接状态', { readyState: mongoose.connection.readyState });
+    if (mongoose.connection.readyState !== 1) {
+      logger.warn('[ShortLink] 数据库未连接，尝试重连...');
+      await connectMongo();
+      logger.info('[ShortLink] 数据库重连完成', { readyState: mongoose.connection.readyState });
+    }
+    const ShortUrlModel = mongoose.models.ShortUrl || mongoose.model('ShortUrl');
+    logger.info('[ShortLink] 查询短链', { code, model: ShortUrlModel.modelName });
+    const record = await ShortUrlModel.findOne({ code });
+    logger.info('[ShortLink] 查询结果', { code, record });
+    if (!record) {
+      logger.warn('[ShortLink] 短链不存在', { ip, code });
+      return res.status(404).send('短链不存在');
+    }
+    logger.info('[ShortLink] 短链跳转', { ip, code, target: record.target });
+    res.redirect(301, record.target); // 永久重定向
+  } catch (err) {
+    logger.error('[ShortLink] 短链跳转异常', { ip, code, error: err });
+    res.status(500).send('短链跳转异常');
+  }
 });
 
 export default router; 
