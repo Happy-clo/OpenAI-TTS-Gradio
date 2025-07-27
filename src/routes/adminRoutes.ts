@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import { authenticateToken } from '../middleware/authenticateToken';
 import logger from '../utils/logger';
+import * as crypto from 'crypto';
 const upload = multer({ limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB限制
 
 const router = express.Router();
@@ -239,6 +240,36 @@ router.post('/envs/delete', adminController.deleteEnv);
 
 // 短链管理API
 router.get('/shortlinks', authenticateToken, async (req, res) => {
+  try {
+    console.log('🔐 [ShortLinkManager] 开始处理短链列表加密请求...');
+    console.log('   用户ID:', req.user?.id);
+    console.log('   用户名:', req.user?.username);
+    console.log('   用户角色:', req.user?.role);
+    console.log('   请求IP:', req.ip);
+    
+    // 检查管理员权限
+    if (!req.user || req.user.role !== 'admin') {
+      console.log('❌ [ShortLinkManager] 权限检查失败：非管理员用户');
+      return res.status(403).json({ error: '需要管理员权限' });
+    }
+
+    console.log('✅ [ShortLinkManager] 权限检查通过');
+
+    // 获取管理员token作为加密密钥
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('❌ [ShortLinkManager] Token格式错误：未携带Token或格式不正确');
+      return res.status(401).json({ error: '未携带Token，请先登录' });
+    }
+    
+    const token = authHeader.substring(7); // 移除 'Bearer ' 前缀
+    if (!token) {
+      console.log('❌ [ShortLinkManager] Token为空');
+      return res.status(401).json({ error: 'Token为空' });
+    }
+
+    console.log('✅ [ShortLinkManager] Token获取成功，长度:', token.length);
+
   const { search = '', page = 1, pageSize = 10 } = req.query;
   const ShortUrlModel = require('mongoose').models.ShortUrl || require('mongoose').model('ShortUrl');
   const query = search
@@ -249,12 +280,70 @@ router.get('/shortlinks', authenticateToken, async (req, res) => {
         ]
       }
     : {};
+    
   const total = await ShortUrlModel.countDocuments(query);
   const items = await ShortUrlModel.find(query)
     .sort({ createdAt: -1 })
     .skip((Number(page) - 1) * Number(pageSize))
     .limit(Number(pageSize));
-  res.json({ total, items });
+
+    console.log('📊 [ShortLinkManager] 获取到短链数量:', items.length);
+    console.log('   总数:', total);
+
+    // 准备加密数据
+    const responseData = { total, items };
+    const jsonData = JSON.stringify(responseData);
+    console.log('📝 [ShortLinkManager] JSON数据准备完成，长度:', jsonData.length);
+
+    // 使用AES-256-CBC加密数据
+    console.log('🔐 [ShortLinkManager] 开始AES-256-CBC加密...');
+    const algorithm = 'aes-256-cbc';
+    
+    // 生成密钥
+    console.log('   生成密钥...');
+    const key = crypto.createHash('sha256').update(token).digest();
+    console.log('   密钥生成完成，长度:', key.length);
+    
+    // 生成IV
+    console.log('   生成初始化向量(IV)...');
+    const iv = crypto.randomBytes(16);
+    console.log('   IV生成完成，长度:', iv.length);
+    console.log('   IV (hex):', iv.toString('hex'));
+    
+    // 创建加密器
+    console.log('   创建加密器...');
+    const cipher = crypto.createCipheriv(algorithm, key, iv);
+    
+    // 执行加密
+    console.log('   开始加密数据...');
+    let encrypted = cipher.update(jsonData, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    
+    console.log('✅ [ShortLinkManager] 加密完成');
+    console.log('   原始数据长度:', jsonData.length);
+    console.log('   加密后数据长度:', encrypted.length);
+    console.log('   加密算法:', algorithm);
+    console.log('   密钥长度:', key.length);
+    console.log('   IV长度:', iv.length);
+
+    // 返回加密后的数据
+    const response = { 
+      success: true, 
+      data: encrypted,
+      iv: iv.toString('hex')
+    };
+    
+    console.log('📤 [ShortLinkManager] 准备返回加密数据');
+    console.log('   响应数据大小:', JSON.stringify(response).length);
+    
+    res.json(response);
+    
+    console.log('✅ [ShortLinkManager] 短链列表加密请求处理完成');
+    
+  } catch (error) {
+    console.error('❌ [ShortLinkManager] 获取短链列表失败:', error);
+    res.status(500).json({ error: '获取短链列表失败' });
+  }
 });
 
 router.delete('/shortlinks/:id', authenticateToken, async (req, res) => {
@@ -273,17 +362,47 @@ router.delete('/shortlinks/:id', authenticateToken, async (req, res) => {
 
 // 创建短链
 router.post('/shortlinks', authenticateToken, async (req, res) => {
-  const { target } = req.body;
+  const { target, customCode } = req.body;
   if (!target || typeof target !== 'string') {
     return res.status(400).json({ error: '目标地址不能为空' });
   }
+  
   const mongoose = require('mongoose');
   const ShortUrlModel = mongoose.models.ShortUrl || mongoose.model('ShortUrl');
   const nanoid = require('nanoid').nanoid;
-  let code = nanoid(6);
-  while (await ShortUrlModel.findOne({ code })) {
-    code = nanoid(6);
+  
+  let code: string;
+  
+  // 如果提供了自定义短链接码
+  if (customCode && typeof customCode === 'string') {
+    const trimmedCode = customCode.trim();
+    
+    // 验证自定义短链接码格式
+    if (trimmedCode.length < 1 || trimmedCode.length > 200) {
+      return res.status(400).json({ error: '自定义短链接码长度必须在1-200个字符之间' });
+    }
+    
+    // 验证字符格式（只允许字母、数字、连字符和下划线）
+    if (!/^[a-zA-Z0-9_-]+$/.test(trimmedCode)) {
+      return res.status(400).json({ error: '自定义短链接码只能包含字母、数字、连字符和下划线' });
+    }
+    
+    // 检查是否已存在
+    const existingShortUrl = await ShortUrlModel.findOne({ code: trimmedCode });
+    if (existingShortUrl) {
+      return res.status(400).json({ error: '该短链接码已被使用，请选择其他短链接码' });
+    }
+    
+    code = trimmedCode;
+  } else {
+    // 生成随机短链接码
+    let randomCode = nanoid(6);
+    while (await ShortUrlModel.findOne({ code: randomCode })) {
+      randomCode = nanoid(6);
   }
+    code = randomCode;
+  }
+  
   const userId = req.user?.id || 'admin';
   const username = req.user?.username || 'admin';
   const doc = await ShortUrlModel.create({ code, target, userId, username });
