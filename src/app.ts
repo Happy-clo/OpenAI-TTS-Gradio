@@ -1,7 +1,7 @@
 // 设置时区为上海
 process.env.TZ = 'Asia/Shanghai';
 
-import express, { Request, Response, NextFunction } from 'express';
+import express, { Request, Response, NextFunction, RequestHandler } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -46,8 +46,12 @@ import miniapiRoutes from './routes/miniapiRoutes';
 import lotteryRoutes from './routes/lotteryRoutes';
 import { connectMongo } from './services/mongoService';
 import modlistRoutes from './routes/modlistRoutes';
+import imageDataRoutes from './routes/imageDataRoutes';
 
 import emailRoutes from './routes/emailRoutes';
+import { commandStatusHandler } from './routes/commandRoutes';
+import { authenticateToken } from './middleware/authenticateToken';
+import { totpStatusHandler } from './routes/totpRoutes';
 
 // 扩展 Request 类型
 declare global {
@@ -240,36 +244,38 @@ app.use(cors({
   exposedHeaders: ['Content-Length', 'X-RateLimit-Limit', 'X-RateLimit-Remaining'],
   maxAge: 86400 // 预检请求的结果可以缓存24小时
 }));
+// 安全头配置
 app.use(helmet({
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-            fontSrc: ["'self'", "https://fonts.gstatic.com"],
-            connectSrc: [
-                "'self'",
-                "https://*.hapxs.com",
-                "https://api.ipify.org",
-                "https://ipapi.co",
-                "https://ipinfo.io",
-                "https://api.ip.sb",
-                "https://cdn.shopimgs.com"
-            ],
-            imgSrc: [
-                "'self'",
-                "data:",
-                "https://api.ipify.org",
-                "https://ipapi.co",
-                "https://ipinfo.io",
-                "https://api.ip.sb"
-            ],
-            scriptSrc: ["'self'", "'unsafe-inline'"],
-            frameSrc: ["'self'", "https://tts.hapx.one",'https://tts-api-docs.hapxs.com']
-        }
-    },
-    crossOriginResourcePolicy: { policy: "cross-origin" },
-    crossOriginEmbedderPolicy: false
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "blob:", "https:"],
+      scriptSrc: ["'self'"],
+      connectSrc: ["'self'", "https://api.openai.com", "https://api.hapxs.com"],
+      frameSrc: ["'none'"],
+      objectSrc: ["'none'"],
+      upgradeInsecureRequests: []
+    }
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  },
+  noSniff: true,
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  xssFilter: true,
+  frameguard: { action: 'deny' }
 }));
+
+// 移除可能泄露信息的响应头
+app.use((req, res, next) => {
+  res.removeHeader('X-Powered-By');
+  res.removeHeader('Server');
+  next();
+});
 app.use(morgan('combined'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -617,6 +623,7 @@ ensureAudioDir().catch(console.error);
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/totp', totpRoutes);
+app.use('/api/totp/status', authenticateToken, totpStatusHandler as RequestHandler);
 app.use('/api/admin', adminLimiter, adminRoutes);
 app.use('/api/status', statusRouter);
 
@@ -641,6 +648,7 @@ app.use('/api/passkey', passkeyRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api/miniapi', miniapiLimiter, miniapiRoutes);
 app.use('/api/modlist', modlistRoutes);
+app.use('/api/image-data', imageDataRoutes);
 
 // 完整性检测相关兜底接口限速
 const integrityLimiter = rateLimit({
@@ -835,7 +843,14 @@ const globalDefaultLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req: Request) => req.ip || (req.socket?.remoteAddress) || 'unknown',
-  skip: (req: Request): boolean => req.isLocalIp || false
+  skip: (req: Request): boolean => {
+    if (req.originalUrl && req.originalUrl.startsWith('/api/command/status')) return true;
+    return req.isLocalIp || false;
+  },
+  handler: (req, res, next) => {
+    logger.warn(`[限流][globalDefaultLimiter] 429 Too Many Requests: ${req.method} ${req.originalUrl} IP: ${req.ip}`);
+    res.status(429).json({ error: '请求过于频繁，请稍后再试' });
+  }
 });
 
 // 404处理限流器
@@ -1376,4 +1391,18 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   } catch (e) {
     logger.warn('[ShortLink] 启动时修复短链用户信息失败', e);
   }
+})();
+
+// 启动时自动检测和修正短链中的旧域名
+(async () => {
+  try {
+    const { shortUrlMigrationService } = require('./services/shortUrlMigrationService');
+    await shortUrlMigrationService.autoFixOnStartup();
+  } catch (e) {
+    logger.warn('[ShortUrlMigration] 启动时自动修正短链域名失败', e);
+  }
 })(); 
+
+// 单独注册 /api/command/status，确保不受限流影响
+app.post('/api/command/status', authenticateToken, commandStatusHandler as RequestHandler);
+app.use('/api/command', commandRoutes); 
