@@ -189,19 +189,95 @@ export class CDKService {
     }
   }
 
-  async deleteCDK(id: string) {
+  async updateCDK(id: string, updateData: { code?: string; resourceId?: string; expiresAt?: Date }) {
     try {
+      // 验证ID格式
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        throw new Error('无效的CDK ID格式');
+      }
+
       const cdk = await CDKModel.findById(id);
       if (!cdk) {
-        logger.warn('删除CDK失败：CDK不存在', { id });
         throw new Error('CDK不存在');
       }
-      
+
       if (cdk.isUsed) {
-        logger.warn('删除CDK失败：CDK已被使用', { id, code: cdk.code });
-        throw new Error('CDK已被使用，无法删除');
+        throw new Error('已使用的CDK无法编辑');
       }
-      
+
+      // 验证更新数据
+      const validatedData: any = {};
+
+      if (updateData.code !== undefined) {
+        // 验证CDK代码格式
+        if (!updateData.code || typeof updateData.code !== 'string' || updateData.code.length !== 16 || !/^[A-Z0-9]{16}$/.test(updateData.code)) {
+          throw new Error('无效的CDK代码格式');
+        }
+        
+        // 检查代码是否已存在（排除当前CDK）
+        const existingCDK = await CDKModel.findOne({ 
+          code: updateData.code, 
+          _id: { $ne: id } 
+        });
+        if (existingCDK) {
+          throw new Error('CDK代码已存在');
+        }
+        
+        validatedData.code = updateData.code;
+      }
+
+      if (updateData.resourceId !== undefined) {
+        // 验证资源ID格式
+        if (!mongoose.Types.ObjectId.isValid(updateData.resourceId)) {
+          throw new Error('无效的资源ID格式');
+        }
+        
+        // 验证资源是否存在
+        const resource = await this.resourceService.getResourceById(updateData.resourceId);
+        if (!resource) {
+          throw new Error('资源不存在');
+        }
+        
+        validatedData.resourceId = updateData.resourceId;
+      }
+
+      if (updateData.expiresAt !== undefined) {
+        if (updateData.expiresAt && new Date(updateData.expiresAt) <= new Date()) {
+          throw new Error('过期时间必须晚于当前时间');
+        }
+        validatedData.expiresAt = updateData.expiresAt;
+      }
+
+      const updatedCDK = await CDKModel.findByIdAndUpdate(
+        id,
+        { $set: validatedData },
+        { new: true }
+      );
+
+      logger.info('更新CDK成功', { id, updateData: validatedData });
+      return updatedCDK;
+    } catch (error) {
+      logger.error('更新CDK失败:', error);
+      throw error;
+    }
+  }
+
+  async deleteCDK(id: string) {
+    try {
+      // 验证ID格式
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        throw new Error('无效的CDK ID格式');
+      }
+
+      const cdk = await CDKModel.findById(id);
+      if (!cdk) {
+        throw new Error('CDK不存在');
+      }
+
+      if (cdk.isUsed) {
+        throw new Error('已使用的CDK无法删除');
+      }
+
       await CDKModel.findByIdAndDelete(id);
       logger.info('删除CDK成功', { id, code: cdk.code });
     } catch (error) {
@@ -346,6 +422,196 @@ export class CDKService {
       logger.error('删除所有未使用CDK失败:', error);
       throw error;
     }
+  }
+
+  /**
+   * 导入CDK数据（管理员功能）- 异步并发处理
+   * 内容格式兼容多种导出样式，例如：
+   *  - "1. CDK信息" / "1. CDK 信息"
+   *  - 字段名支持："CDK代码:" 或 "代码:", "资源ID:", "过期时间:"
+   */
+  async importCDKs(content: string) {
+    try {
+      const lines = content.split('\n');
+      const itemsToImport: any[] = [];
+      let current: any = {};
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        // 开始新条目
+        if (/^\d+\./.test(line) && /CDK/.test(line)) {
+          if (current.code && current.resourceId) {
+            itemsToImport.push({ ...current });
+          }
+          current = {};
+          continue;
+        }
+
+        // 解析字段
+        if (line.startsWith('CDK代码: ')) {
+          current.code = line.replace('CDK代码: ', '').trim();
+        } else if (line.startsWith('代码: ')) {
+          current.code = line.replace('代码: ', '').trim();
+        } else if (line.startsWith('资源ID: ')) {
+          current.resourceId = line.replace('资源ID: ', '').trim();
+        } else if (line.startsWith('过期时间: ')) {
+          current.expiresAt = line.replace('过期时间: ', '').trim();
+        }
+      }
+
+      // 处理最后一条
+      if (current.code && current.resourceId) {
+        itemsToImport.push({ ...current });
+      }
+
+      const results = await this.processCDKsAsync(itemsToImport);
+
+      logger.info('导入CDK数据完成', {
+        importedCount: results.importedCount,
+        skippedCount: results.skippedCount,
+        errorCount: results.errorCount,
+        totalItems: itemsToImport.length
+      });
+
+      return results;
+    } catch (error) {
+      logger.error('导入CDK数据失败:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * 异步并发处理多个CDK
+   */
+  private async processCDKsAsync(items: any[]): Promise<{
+    importedCount: number;
+    skippedCount: number;
+    errorCount: number;
+    errors: string[];
+  }> {
+    const batchSize = 10;
+    const errors: string[] = [];
+    let importedCount = 0;
+    let skippedCount = 0;
+    let errorCount = 0;
+
+    for (let i = 0; i < items.length; i += batchSize) {
+      const batch = items.slice(i, i + batchSize);
+
+      const batchPromises = batch.map(async (item) => {
+        try {
+          const result = await this.processImportCDKAsync(item);
+          return result;
+        } catch (error) {
+          return {
+            skipped: false,
+            error: `CDK ${item.code}: ${error instanceof Error ? error.message : String(error)}`
+          };
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+
+      batchResults.forEach((r) => {
+        if (r.error) {
+          errors.push(r.error);
+          errorCount++;
+        } else if (r.skipped) {
+          skippedCount++;
+        } else {
+          importedCount++;
+        }
+      });
+
+      logger.info(`处理CDK批次 ${Math.floor(i / batchSize) + 1}/${Math.ceil(items.length / batchSize)}`, {
+        batchSize: batch.length,
+        processed: i + batch.length,
+        total: items.length
+      });
+    }
+
+    return {
+      importedCount,
+      skippedCount,
+      errorCount,
+      errors: errors.slice(0, 10)
+    };
+  }
+
+  /**
+   * 处理单个导入CDK - 异步版本
+   */
+  private async processImportCDKAsync(item: any): Promise<{ skipped: boolean; error?: string }> {
+    return new Promise(async (resolve) => {
+      try {
+        // 必需字段
+        if (!item.code || !item.resourceId) {
+          throw new Error('缺少必需的CDK代码或资源ID');
+        }
+
+        // 过滤无效值
+        if (item.code === 'undefined' || item.resourceId === 'undefined' || !String(item.code).trim() || !String(item.resourceId).trim()) {
+          throw new Error('CDK代码或资源ID包含无效值');
+        }
+
+        const code = String(item.code).trim();
+        const resourceId = String(item.resourceId).trim();
+
+        // 验证代码格式：16位大写字母数字
+        if (!/^[A-Z0-9]{16}$/.test(code)) {
+          throw new Error('无效的CDK代码格式');
+        }
+
+        // 验证资源ID
+        if (!mongoose.isValidObjectId(resourceId)) {
+          throw new Error('无效的资源ID');
+        }
+        const resourceExists = await ResourceModel.exists({ _id: new mongoose.Types.ObjectId(resourceId) });
+        if (!resourceExists) {
+          throw new Error('资源不存在');
+        }
+
+        // 过期时间（可选）
+        let expiresAt: Date | undefined = undefined;
+        if (item.expiresAt) {
+          const d = new Date(String(item.expiresAt));
+          if (isNaN(d.getTime())) {
+            throw new Error('过期时间格式无效');
+          }
+          if (d.getTime() <= Date.now()) {
+            throw new Error('过期时间必须晚于当前时间');
+          }
+          expiresAt = d;
+        }
+
+        // 重复检查
+        const existing = await CDKModel.findOne({ code });
+        if (existing) {
+          logger.info(`跳过重复CDK: ${code}`);
+          resolve({ skipped: true });
+          return;
+        }
+
+        // 创建
+        const doc: Partial<ICDK> = {
+          code,
+          resourceId,
+          isUsed: false,
+          createdAt: new Date()
+        } as any;
+        if (expiresAt) (doc as any).expiresAt = expiresAt;
+
+        await CDKModel.create(doc);
+        logger.debug(`成功导入CDK: ${code}`);
+        resolve({ skipped: false });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        logger.warn(`导入CDK失败 ${item.code}: ${msg}`);
+        resolve({ skipped: false, error: msg });
+      }
+    });
   }
 
   private generateUniqueCode(): string {

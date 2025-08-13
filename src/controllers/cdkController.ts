@@ -86,6 +86,36 @@ export const generateCDKs = async (req: AuthRequest, res: Response) => {
   }
 };
 
+// 编辑CDK
+export const updateCDK = async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { code, resourceId, expiresAt } = req.body;
+    
+    const updateData: { code?: string; resourceId?: string; expiresAt?: Date } = {};
+    
+    if (code !== undefined) updateData.code = code;
+    if (resourceId !== undefined) updateData.resourceId = resourceId;
+    if (expiresAt !== undefined) updateData.expiresAt = expiresAt ? new Date(expiresAt) : undefined;
+    
+    const updatedCDK = await cdkService.updateCDK(id, updateData);
+    
+    logger.info('编辑CDK成功', { 
+      id, 
+      userId: req.user?.id,
+      username: req.user?.username,
+      updateData 
+    });
+    
+    res.json(updatedCDK);
+  } catch (error) {
+    logger.error('编辑CDK失败:', error);
+    res.status(400).json({ 
+      message: error instanceof Error ? error.message : '编辑CDK失败' 
+    });
+  }
+};
+
 // 删除CDK
 export const deleteCDK = async (req: AuthRequest, res: Response) => {
   try {
@@ -190,6 +220,34 @@ export const deleteUnusedCDKs = async (req: AuthRequest, res: Response) => {
     logger.error('删除所有未使用CDK失败:', error);
     res.status(500).json({ 
       message: error instanceof Error ? error.message : '删除所有未使用CDK失败' 
+    });
+  }
+};
+
+// 导入CDK数据（管理员）
+export const importCDKs = async (req: AuthRequest, res: Response) => {
+  try {
+    const { content } = req.body || {};
+    if (!content || typeof content !== 'string') {
+      return res.status(400).json({ message: '请提供要导入的文本内容' });
+    }
+
+    const results = await cdkService.importCDKs(content);
+
+    logger.info('导入CDK数据成功', {
+      userId: req.user?.id,
+      username: req.user?.username,
+      ...results
+    });
+
+    res.json({
+      message: `成功导入 ${results.importedCount} 个，跳过重复 ${results.skippedCount} 个，错误 ${results.errorCount} 个`,
+      ...results
+    });
+  } catch (error) {
+    logger.error('导入CDK数据失败:', error);
+    res.status(500).json({ 
+      message: error instanceof Error ? error.message : '导入CDK数据失败' 
     });
   }
 };
