@@ -3,6 +3,7 @@ import FBIWantedModel, { IFBIWanted } from '../models/fbiWantedModel';
 import logger from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 import { isValidObjectId, Types } from 'mongoose';
+import { IPFSService } from '../services/ipfsService';
 
 // 生成NCIC编号
 function generateNCICNumber(): string {
@@ -77,8 +78,12 @@ export const fbiWantedController = {
             }
 
             if (typeof search === 'string' && search.trim()) {
-                const safeSearch = search.substring(0, 100);
-                query.$text = { $search: safeSearch };
+                // 严格限制搜索字符串，移除潜在危险字符，仅保留字母/数字/空格/引号/连字符
+                const trimmed = search.substring(0, 100);
+                const safeSearch = trimmed.replace(/[^\w\s'"-]/g, ' ').replace(/\s+/g, ' ').trim();
+                if (safeSearch) {
+                    query.$text = { $search: safeSearch };
+                }
             }
 
             // 分页参数约束
@@ -111,6 +116,55 @@ export const fbiWantedController = {
                 success: false,
                 message: '获取通缉犯列表失败'
             });
+        }
+    },
+
+    // 更新通缉犯头像图片（管理员）
+    async updateWantedPhoto(req: Request, res: Response) {
+        try {
+            const { id } = req.params;
+            if (!isValidObjectId(id)) {
+                return res.status(400).json({ success: false, message: '无效的ID' });
+            }
+
+            // 需要 multer 解析后的单文件，字段名为 photo
+            const file = (req as any).file as Express.Multer.File | undefined;
+            if (!file) {
+                return res.status(400).json({ success: false, message: '未找到上传的文件（字段名应为 photo）' });
+            }
+
+            // 上传到 IPFS（仅允许图片，大小上限在服务内校验）
+            const uploadRes = await IPFSService.uploadFile(
+                file.buffer,
+                file.originalname || 'avatar.jpg',
+                file.mimetype,
+                { shortLink: false }
+            );
+
+            const photoUrl = uploadRes.web2url || uploadRes.url; // 优先使用可直接访问的 Web2 URL
+
+            const updated = await FBIWantedModel.findByIdAndUpdate(
+                id,
+                { $set: { photoUrl, lastUpdated: new Date() } },
+                { new: true, runValidators: true }
+            );
+
+            if (!updated) {
+                return res.status(404).json({ success: false, message: '未找到该通缉犯记录' });
+            }
+
+            logger.info(`更新通缉犯头像成功: ${updated.name} (${updated.fbiNumber}) -> ${photoUrl}`);
+
+            return res.json({
+                success: true,
+                message: '头像更新成功',
+                data: updated,
+                ipfs: uploadRes
+            });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            logger.error('更新通缉犯头像失败:', msg);
+            return res.status(500).json({ success: false, message: '更新通缉犯头像失败', error: msg });
         }
     },
 
@@ -245,13 +299,70 @@ export const fbiWantedController = {
             if (!isValidObjectId(id)) {
                 return res.status(400).json({ success: false, message: '无效的ID' });
             }
-            const updateData: any = { ...req.body };
+            // 仅允许白名单字段被更新，避免批量赋值和操作符注入
+            const allowedFields = new Set([
+                'name',
+                'description',
+                'aliases',
+                'charges',
+                'dateOfBirth',
+                'age',
+                'dangerLevel',
+                'status',
+                'photoUrl',
+                'fbiNumber',
+                'ncicNumber',
+            ]);
 
-            // 清理输入数据
-            if (updateData.name) updateData.name = sanitizeInput(updateData.name);
-            if (updateData.description) updateData.description = sanitizeInput(updateData.description);
-            if (updateData.aliases) updateData.aliases = updateData.aliases.map((alias: string) => sanitizeInput(alias));
-            if (updateData.charges) updateData.charges = updateData.charges.map((charge: string) => sanitizeInput(charge));
+            const body = req.body && typeof req.body === 'object' ? req.body : {};
+            const updateData: any = {};
+
+            for (const [key, value] of Object.entries(body)) {
+                // 拒绝以 $ 开头或包含点号的键，防止操作符注入/路径注入
+                if (key.startsWith('$') || key.includes('.')) continue;
+                if (!allowedFields.has(key)) continue;
+                switch (key) {
+                    case 'name':
+                    case 'description':
+                    case 'photoUrl':
+                    case 'fbiNumber':
+                    case 'ncicNumber':
+                        updateData[key] = sanitizeInput(String(value));
+                        break;
+                    case 'aliases':
+                    case 'charges':
+                        if (Array.isArray(value)) {
+                            updateData[key] = value.map((v) => sanitizeInput(String(v))).filter(Boolean);
+                        }
+                        break;
+                    case 'dateOfBirth':
+                        if (value) updateData.dateOfBirth = new Date(value as any);
+                        break;
+                    case 'dangerLevel': {
+                        const allowedDanger = ['LOW', 'MEDIUM', 'HIGH', 'EXTREME'];
+                        if (typeof value === 'string' && allowedDanger.includes(value)) {
+                            updateData.dangerLevel = value;
+                        }
+                        break;
+                    }
+                    case 'status': {
+                        const allowedStatus = ['ACTIVE', 'CAPTURED', 'DECEASED', 'REMOVED'];
+                        if (typeof value === 'string' && allowedStatus.includes(value)) {
+                            updateData.status = value;
+                        }
+                        break;
+                    }
+                    case 'age': {
+                        if (value !== undefined && value !== null && value !== '') {
+                            const num = Number(value);
+                            if (!Number.isNaN(num) && Number.isFinite(num) && num >= 0 && num <= 1500) {
+                                updateData.age = num;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
 
             // 如果更新了 dateOfBirth 而未明确提供 age，则基于 DOB 重新计算 age
             if ('dateOfBirth' in updateData && !('age' in updateData)) {
@@ -428,20 +539,23 @@ export const fbiWantedController = {
                 return res.status(400).json({ success: false, message: '无效的ID' });
             }
 
-            if (!['ACTIVE', 'CAPTURED', 'DECEASED', 'REMOVED'].includes(status)) {
+            // 严格校验并白名单限制状态，防止注入恶意更新键
+            const allowedStatuses = ['ACTIVE', 'CAPTURED', 'DECEASED', 'REMOVED'] as const;
+            if (typeof status !== 'string' || !allowedStatuses.includes(status as any)) {
                 return res.status(400).json({
                     success: false,
                     message: '无效的状态值'
                 });
             }
 
+            // 使用$set并显式字段，避免将用户输入直接作为更新对象传入
+            type SafeStatus = typeof allowedStatuses[number];
+            const safeStatus: SafeStatus = status as SafeStatus;
+
             const updatedWanted = await FBIWantedModel.findByIdAndUpdate(
                 id,
-                {
-                    status,
-                    lastUpdated: new Date()
-                },
-                { new: true }
+                { $set: { status: safeStatus, lastUpdated: new Date() } },
+                { new: true, runValidators: true }
             );
 
             if (!updatedWanted) {
