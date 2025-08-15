@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import axios from 'axios';
+import { api } from '../api/api';
+
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import CryptoJS from 'crypto-js';
+import { useNotification } from './Notification';
 import {
   FaUsers,
   FaUserPlus,
@@ -18,6 +20,13 @@ import {
   FaList
 } from 'react-icons/fa';
 
+interface FingerprintRecord {
+  id: string;
+  ts: number;
+  ua?: string;
+  ip?: string;
+}
+
 interface User {
   id: string;
   username: string;
@@ -25,22 +34,14 @@ interface User {
   password: string;
   role: string;
   createdAt: string;
+  fingerprints?: FingerprintRecord[];
+  requireFingerprint?: boolean;
+  requireFingerprintAt?: number;
 }
 
 const emptyUser = { id: '', username: '', email: '', password: '', role: 'user', createdAt: '' };
 
-// 获取API基础URL
-const getApiBaseUrl = () => {
-  if (import.meta.env.DEV) return 'http://localhost:3000';
-  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
-  return 'https://api.hapxs.com';
-};
-
-const api = axios.create({
-  baseURL: getApiBaseUrl(),
-  withCredentials: true,
-  headers: { 'Content-Type': 'application/json' }
-});
+// 使用全局 API 实例，统一 baseURL/拦截器
 
 // AES-256解密函数
 function decryptAES256(encryptedData: string, iv: string, key: string): string {
@@ -84,7 +85,12 @@ const UserManagement: React.FC = () => {
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [form, setForm] = useState<User>(emptyUser);
   const [showForm, setShowForm] = useState(false);
+  const [fpUser, setFpUser] = useState<User | null>(null);
+  const [showFpModal, setShowFpModal] = useState(false);
+  // 记录管理员对各用户发起“请求下次上报”的最新时间（仅前端展示用）
+  const [fpRequireMap, setFpRequireMap] = useState<Record<string, number>>({});
   const navigate = useNavigate();
+  const { setNotification } = useNotification();
 
   // 获取用户列表
   const fetchUsers = async () => {
@@ -94,12 +100,11 @@ const UserManagement: React.FC = () => {
       const token = localStorage.getItem('token') || '';
       if (!token) {
         setError('未找到有效的认证令牌，请重新登录');
+        setNotification({ type: 'warning', message: '未找到认证令牌，请重新登录后重试' });
         return;
       }
 
-      const res = await api.get('/api/admin/users', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      const res = await api.get('/api/admin/users', { params: { includeFingerprints: 1 } });
 
       // 检查是否为加密数据
       if (res.data.data && res.data.iv && typeof res.data.data === 'string' && typeof res.data.iv === 'string') {
@@ -116,28 +121,33 @@ const UserManagement: React.FC = () => {
           if (Array.isArray(decryptedData)) {
             console.log('✅ 解密成功，获取到', decryptedData.length, '个用户');
             setUsers(decryptedData);
+            const initMap: Record<string, number> = {};
+            for (const u of decryptedData) {
+              const ts = Number((u as any).requireFingerprintAt || 0);
+              if (ts > 0) initMap[(u as any).id] = ts;
+            }
+            setFpRequireMap(initMap);
+            setNotification({ type: 'success', message: `已获取 ${decryptedData.length} 个用户` });
           } else {
             console.error('❌ 解密数据格式错误，期望数组格式');
             setError('解密数据格式错误');
+            setNotification({ type: 'error', message: '解密数据格式错误' });
           }
         } catch (decryptError) {
           console.error('❌ 解密失败:', decryptError);
           setError('数据解密失败，请检查登录状态');
+          setNotification({ type: 'error', message: '数据解密失败，请检查登录状态' });
         }
       } else {
         // 兼容旧的未加密格式
         console.log('📝 使用未加密格式数据');
         setUsers(res.data);
+        const count = Array.isArray(res.data) ? res.data.length : 0;
+        if (count) setNotification({ type: 'success', message: `已获取 ${count} 个用户` });
       }
     } catch (e: any) {
       console.error('获取用户列表失败:', e);
-      if (e.response?.status === 401) {
-        setError('认证失败，请重新登录');
-      } else if (e.response?.status === 403) {
-        setError('需要管理员权限');
-      } else {
-        setError(e.response?.data?.error || e.message || '获取用户失败');
-      }
+      setNotification({ type: 'error', message: e?.response?.data?.error || e?.message || '获取用户列表失败' });
     } finally {
       setLoading(false);
     }
@@ -162,15 +172,16 @@ const UserManagement: React.FC = () => {
       const res = await api.request({
         url,
         method,
-        headers: { Authorization: `Bearer ${token}` },
         data: form
       });
       setShowForm(false);
       setEditingUser(null);
       setForm(emptyUser);
+      setNotification({ type: 'success', message: editingUser ? '用户信息已更新' : '用户已创建' });
       fetchUsers();
     } catch (e: any) {
       setError(e.response?.data?.error || e.message || '操作失败');
+      setNotification({ type: 'error', message: e?.response?.data?.error || e?.message || '操作失败' });
     } finally {
       setLoading(false);
     }
@@ -183,12 +194,12 @@ const UserManagement: React.FC = () => {
     setError('');
     try {
       const token = localStorage.getItem('token') || '';
-      await api.delete(`/api/admin/users/${id}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      await api.delete(`/api/admin/users/${id}`);
+      setNotification({ type: 'success', message: '用户已删除' });
       fetchUsers();
     } catch (e: any) {
       setError(e.response?.data?.error || e.message || '删除失败');
+      setNotification({ type: 'error', message: e?.response?.data?.error || e?.message || '删除失败' });
     } finally {
       setLoading(false);
     }
@@ -404,7 +415,7 @@ const UserManagement: React.FC = () => {
         {/* 用户列表 */}
         {loading ? (
           <div className="text-center py-8 text-gray-500">
-            <svg className="animate-spin h-8 w-8 mx-auto mb-4 text-blue-500" fill="none" viewBox="0 0 24 24">
+            <svg className="animate-spin h-8 w-8 mx-auto mb-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg>
@@ -419,6 +430,7 @@ const UserManagement: React.FC = () => {
                   <th className="px-4 py-3 text-left font-semibold">邮箱</th>
                   <th className="px-4 py-3 text-left font-semibold">角色</th>
                   <th className="px-4 py-3 text-left font-semibold">创建时间</th>
+                  <th className="px-4 py-3 text-left font-semibold">指纹</th>
                   <th className="px-4 py-3 text-left font-semibold">操作</th>
                 </tr>
               </thead>
@@ -447,6 +459,59 @@ const UserManagement: React.FC = () => {
                     </td>
                     <td className="px-4 py-3 text-gray-600 text-sm">
                       {new Date(u.createdAt).toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 text-gray-600 text-xs">
+                      {u.fingerprints && u.fingerprints.length > 0 ? (
+                        <div className="space-y-1">
+                          <div>
+                            最新: <span className="font-mono" title={u.fingerprints[0].id}>{u.fingerprints[0].id.slice(0, 12)}{u.fingerprints[0].id.length > 12 ? '…' : ''}</span>
+                          </div>
+                          <div className="text-[10px] text-gray-500">
+                            {new Date(u.fingerprints[0].ts).toLocaleString()} · {u.fingerprints.length} 条
+                          </div>
+                          <button
+                            className="text-blue-600 hover:underline text-[11px]"
+                            onClick={() => { setFpUser(u); setShowFpModal(true); }}
+                          >查看全部</button>
+                        </div>
+                      ) : (
+                        <div className="space-y-1">
+                          {fpRequireMap[u.id] ? (
+                            <>
+                              <div className="text-blue-600 text-[12px]">已在预约列表</div>
+                              <div className="text-[10px] text-gray-500">上次预约：{new Date(fpRequireMap[u.id]).toLocaleString()}</div>
+                              <button
+                                className="text-blue-600 hover:underline text-[11px]"
+                                onClick={async () => {
+                                  try {
+                                    await api.post(`/api/admin/users/${u.id}/fingerprint/require`, { require: true });
+                                    setFpRequireMap(prev => ({ ...prev, [u.id]: Date.now() }));
+                                    setNotification({ type: 'success', message: '已再次请求该用户下次上报指纹' });
+                                  } catch (e: any) {
+                                    setNotification({ type: 'error', message: e?.response?.data?.error || e?.message || '请求失败' });
+                                  }
+                                }}
+                              >再次请求</button>
+                            </>
+                          ) : (
+                            <>
+                              <span className="text-gray-400">暂无</span>
+                              <button
+                                className="text-blue-600 hover:underline text-[11px]"
+                                onClick={async () => {
+                                  try {
+                                    await api.post(`/api/admin/users/${u.id}/fingerprint/require`, { require: true });
+                                    setFpRequireMap(prev => ({ ...prev, [u.id]: Date.now() }));
+                                    setNotification({ type: 'success', message: '已请求该用户下次上报指纹' });
+                                  } catch (e: any) {
+                                    setNotification({ type: 'error', message: e?.response?.data?.error || e?.message || '请求失败' });
+                                  }
+                                }}
+                              >请求上报</button>
+                            </>
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex gap-2">
@@ -481,6 +546,150 @@ const UserManagement: React.FC = () => {
           </div>
         )}
       </motion.div>
+      {/* 指纹详情弹窗 */}
+      <AnimatePresence>
+        {showFpModal && fpUser && (
+          <motion.div
+            className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6"
+              initial={{ scale: 0.95, y: 20, opacity: 0 }}
+              animate={{ scale: 1, y: 0, opacity: 1 }}
+              exit={{ scale: 0.95, y: 20, opacity: 0 }}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-gray-800">指纹详情 - {fpUser.username}</h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+                    onClick={async () => {
+                      if (!fpUser) return;
+                      try {
+                        await api.post(`/api/admin/users/${fpUser.id}/fingerprint/require`, { require: true });
+                        setFpRequireMap(prev => ({ ...prev, [fpUser.id]: Date.now() }));
+                        setNotification({ type: 'success', message: '已请求该用户下次上报指纹' });
+                      } catch (e: any) {
+                        setNotification({ type: 'error', message: e?.response?.data?.error || e?.message || '请求失败' });
+                      }
+                    }}
+                  >请求下次上报</button>
+                  <button
+                    className="px-3 py-1 text-sm bg-red-600 text-white rounded hover:bg-red-700"
+                    onClick={async () => {
+                      if (!fpUser) return;
+                      if (!window.confirm('确定要清空该用户的全部指纹记录吗？此操作不可撤销')) return;
+                      try {
+                        const res = await api.delete(`/api/admin/users/${fpUser.id}/fingerprints`);
+                        const next = res?.data?.fingerprints || [];
+                        setFpUser({ ...fpUser, fingerprints: next });
+                        setUsers(prev => prev.map(u => u.id === fpUser.id ? { ...u, fingerprints: next } : u));
+                        setNotification({ type: 'success', message: '已清空全部指纹记录' });
+                      } catch (e: any) {
+                        setNotification({ type: 'error', message: e?.response?.data?.error || e?.message || '清空指纹失败' });
+                      }
+                    }}
+                  >清空全部</button>
+                  <button className="text-gray-500 hover:text-gray-700" onClick={() => setShowFpModal(false)}>✕</button>
+                </div>
+              </div>
+              {fpUser.fingerprints && fpUser.fingerprints.length > 0 ? (
+                <div className="max-h-96 overflow-auto space-y-3">
+                  {fpUser.fingerprints.map((fp, i) => (
+                    <div key={i} className="p-3 border border-gray-200 rounded-lg">
+                      <div className="text-xs text-gray-500 mb-1">{new Date(fp.ts).toLocaleString()} · IP {fp.ip || '-'} </div>
+                      <div className="font-mono break-all text-sm">{fp.id}</div>
+                      {fp.ua && <div className="text-[11px] text-gray-500 mt-1 break-all">{fp.ua}</div>}
+                      <div className="mt-2">
+                        <button
+                          className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard?.writeText(fp.id);
+                              setNotification({ type: 'success', message: '已复制指纹ID到剪贴板' });
+                            } catch {
+                              setNotification({ type: 'error', message: '复制失败，请手动选择文本复制' });
+                            }
+                          }}
+                        >复制ID</button>
+                        <button
+                          className="ml-2 px-2 py-1 text-xs bg-red-500 text-white rounded hover:bg-red-600"
+                          onClick={async () => {
+                            if (!fpUser) return;
+                            if (!window.confirm('确定要删除该指纹记录吗？')) return;
+                            try {
+                              const res = await api.delete(`/api/admin/users/${fpUser.id}/fingerprints/${encodeURIComponent(fp.id)}`, {
+                                params: { ts: fp.ts }
+                              });
+                              const next = res?.data?.fingerprints || [];
+                              // 同步更新本地状态
+                              setFpUser({ ...fpUser, fingerprints: next });
+                              // 同步刷新 users 列表中的该用户
+                              setUsers(prev => prev.map(u => u.id === fpUser.id ? { ...u, fingerprints: next } : u));
+                              setNotification({ type: 'success', message: '已删除指纹记录' });
+                            } catch (e: any) {
+                              setNotification({ type: 'error', message: e?.response?.data?.error || e?.message || '删除指纹失败' });
+                            }
+                          }}
+                        >删除</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center text-gray-500">
+                  暂无指纹数据
+                  {fpUser && fpRequireMap[fpUser.id] ? (
+                    <div className="mt-2">
+                      <div className="text-blue-600 text-sm">已在预约列表</div>
+                      <div className="text-[12px] text-gray-500">上次预约：{new Date(fpRequireMap[fpUser.id]).toLocaleString()}</div>
+                      <button
+                        className="mt-2 text-blue-600 hover:underline text-[12px]"
+                        onClick={async () => {
+                          if (!fpUser) return;
+                          try {
+                            const r = await api.post(`/api/admin/users/${fpUser.id}/fingerprint/require`, { require: true });
+                            const ts = Number(r?.data?.requireFingerprintAt || Date.now());
+                            setFpRequireMap(prev => ({ ...prev, [fpUser.id]: ts }));
+                            const timeStr = new Date(ts).toLocaleString();
+                            setNotification({ type: 'success', message: `已再次请求该用户下次上报指纹，已在预约列表\n上次预约：${timeStr}` });
+                          } catch (e: any) {
+                            setNotification({ type: 'error', message: e?.response?.data?.error || e?.message || '请求失败' });
+                          }
+                        }}
+                      >再次请求</button>
+                    </div>
+                  ) : (
+                    <div className="mt-2">
+                      <button
+                        className="text-blue-600 hover:underline text-[12px]"
+                        onClick={async () => {
+                          if (!fpUser) return;
+                          try {
+                            const r = await api.post(`/api/admin/users/${fpUser.id}/fingerprint/require`, { require: true });
+                            const ts = Number(r?.data?.requireFingerprintAt || Date.now());
+                            setFpRequireMap(prev => ({ ...prev, [fpUser.id]: ts }));
+                            const timeStr = new Date(ts).toLocaleString();
+                            setNotification({ type: 'success', message: `已请求该用户下次上报指纹，已在预约列表\n上次预约：${timeStr}` });
+                          } catch (e: any) {
+                            setNotification({ type: 'error', message: e?.response?.data?.error || e?.message || '请求失败' });
+                          }
+                        }}
+                      >请求上报</button>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className="mt-4 text-right">
+                <button className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600" onClick={() => setShowFpModal(false)}>关闭</button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 };

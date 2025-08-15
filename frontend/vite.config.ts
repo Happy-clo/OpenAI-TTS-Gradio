@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import vitePluginsAutoI18n, { GoogleTranslator } from 'vite-auto-i18n-plugin'
 import path from 'path'
 import JavaScriptObfuscator from 'javascript-obfuscator'
 
@@ -23,6 +24,7 @@ function obfuscateDistJs() {
       stringArrayThreshold: 0.75,
       selfDefending: true,
       disableConsoleOutput: true,
+      unicodeEscapeSequence: true,
     }).getObfuscatedCode();
     fs.writeFileSync(filePath, obfuscated, 'utf-8');
   }
@@ -33,6 +35,40 @@ export default defineConfig(({ mode }) => {
   const config = {
     plugins: [
       react(),
+      // 自动多语言翻译插件（默认使用 Google 翻译）
+      // vitePluginsAutoI18n({
+      //   enabled: false,
+      //   deepScan: true,
+      //   translateType: 'full-auto',
+      //   translateKey: '$t',
+      //   // 默认只扫描 src 目录
+      //   includePath: [/src\//],
+      //   // 生成语言文件的目录（相对项目根目录），入口需引入 ../lang/index.js
+      //   globalPath: './lang',
+      //   // 基础语言与目标语言
+      //   originLang: 'zh-cn', // 源语言（简体中文）
+      //   // 支持 en、zhcn(=zh-cn)、zhtw(=zh-tw)
+      //   targetLangList: ['en', 'zh-cn', 'zh-tw'],
+      //   // 构建行为
+      //   buildToDist: true,
+      //   // 将打包后的翻译文件输出到 dist/lang 目录
+      //   distPath: 'lang',
+      //   // 打包后的翻译主文件名称
+      //   distKey: 'index',
+      //   rewriteConfig: true,
+      //   // 使用默认 Google 翻译（生产环境不走代理）
+      //   translator: new GoogleTranslator(
+      //     process.env.NODE_ENV === 'production'
+      //       ? {}
+      //       : {
+      //         proxyOption: {
+      //           host: '127.0.0.1',
+      //           port: 7890,
+      //           headers: { 'User-Agent': 'Node' }
+      //         }
+      //       }
+      //   ),
+      // }),
       {
         name: 'obfuscator',
         enforce: 'post' as const,
@@ -40,34 +76,34 @@ export default defineConfig(({ mode }) => {
           // 只在生产环境进行代码混淆
           if (mode === 'production' && id.endsWith('.js')) {
             const obfuscationResult = JavaScriptObfuscator.obfuscate(code, {
-              compact: true,
-              controlFlowFlattening: false,
-              deadCodeInjection: false,
-              debugProtection: true,
-              debugProtectionInterval: 2000,
-              disableConsoleOutput: true,
-              identifierNamesGenerator: 'hexadecimal',
-              log: false,
-              numbersToExpressions: true,
-              renameGlobals: false,
-              selfDefending: true,
-              simplify: true,
-              splitStrings: true,
-              splitStringsChunkLength: 10,
-              stringArray: true,
-              stringArrayCallsTransform: true,
-              stringArrayCallsTransformThreshold: 0.75,
-              stringArrayEncoding: ['base64'],
-              stringArrayIndexShift: true,
-              stringArrayRotate: true,
-              stringArrayShuffle: true,
-              stringArrayWrappersCount: 2,
-              stringArrayWrappersChainedCalls: true,
-              stringArrayWrappersParametersMaxCount: 4,
-              stringArrayWrappersType: 'function',
-              stringArrayThreshold: 0.75,
-              transformObjectKeys: true,
-              unicodeEscapeSequence: false
+              compact: true, // 压缩输出体积，去除多余空白与换行
+              controlFlowFlattening: false, // 关闭控制流扁平化（性能开销大，影响运行速度）
+              deadCodeInjection: false, // 不注入死代码（避免包体积大幅增长）
+              debugProtection: true, // 阻止使用 DevTools 调试（检测 debugger 等）
+              debugProtectionInterval: 2000, // 调试防护轮询间隔（毫秒），与 debugProtection 配合
+              disableConsoleOutput: true, // 移除/替换 console 输出，降低信息泄露
+              identifierNamesGenerator: 'hexadecimal', // 标识符改写为十六进制格式
+              log: false, // 关闭混淆器自身日志
+              numbersToExpressions: true, // 将字面量数字替换为等价表达式，增加阅读难度
+              renameGlobals: false, // 不重命名全局变量，避免与外部环境冲突
+              selfDefending: true, // 自我防护：防止格式化/美化与运行时篡改
+              simplify: true, // 启用语义保持的简化变换，提升混淆一致性
+              splitStrings: true, // 拆分长字符串为片段
+              splitStringsChunkLength: 10, // 字符串拆分片段长度
+              stringArray: true, // 启用字符串抽离到数组
+              stringArrayCallsTransform: true, // 将直接字符串访问改为通过函数访问
+              stringArrayCallsTransformThreshold: 0.75, // 上述转换应用的概率阈值
+              stringArrayEncoding: ['base64'], // 字符串数组编码方式（base64）
+              stringArrayIndexShift: true, // 访问字符串数组时启用索引偏移
+              stringArrayRotate: true, // 旋转字符串数组元素顺序
+              stringArrayShuffle: true, // 打乱字符串数组顺序
+              stringArrayWrappersCount: 2, // 生成多层包装器数量（增加还原成本）
+              stringArrayWrappersChainedCalls: true, // 包装器链式调用，进一步混淆
+              stringArrayWrappersParametersMaxCount: 4, // 包装器的最大参数个数
+              stringArrayWrappersType: 'function', // 包装器实现类型
+              stringArrayThreshold: 0.75, // 抽离到字符串数组的概率阈值
+              transformObjectKeys: true, // 混淆对象字面量的键名
+              unicodeEscapeSequence: true // 使用 Unicode 转义输出字符串
             });
             return {
               code: obfuscationResult.getObfuscatedCode(),
@@ -146,10 +182,10 @@ export default defineConfig(({ mode }) => {
         external: (id: string) => {
           // 避免 Rollup 尝试处理可选依赖
           if (process.env.VITE_SKIP_ROLLUP_NATIVE === 'true') {
-            return id.includes('@rollup/rollup-linux-x64-gnu') || 
-                   id.includes('@rollup/rollup-darwin-x64') ||
-                   id.includes('@rollup/rollup-win32-x64-msvc') ||
-                   id.includes('@rollup/rollup-win32-x64-gnu');
+            return id.includes('@rollup/rollup-linux-x64-gnu') ||
+              id.includes('@rollup/rollup-darwin-x64') ||
+              id.includes('@rollup/rollup-win32-x64-msvc') ||
+              id.includes('@rollup/rollup-win32-x64-gnu');
           }
           return false;
         },

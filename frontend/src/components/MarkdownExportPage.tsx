@@ -2,44 +2,21 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { FaFileAlt, FaDownload, FaEye, FaFileWord, FaFilePdf, FaUpload, FaCopy, FaTrash } from 'react-icons/fa';
 import { marked } from 'marked';
-import markedKatex from 'marked-katex-extension';
-import 'katex/dist/katex.min.css';
-import '../styles/katex-fonts.css';
-import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
+// marked-katex-extension 改为按需动态加载，避免初始包体积
+// jspdf 与 html2canvas 改为按需动态加载，仅在导出PDF时加载
 import DOMPurify from 'dompurify';
+// 拆分：按 CommandManager 方式将逻辑拆到独立文件
+import MarkdownPreview from './MarkdownExportPage/MarkdownPreview';
+import { useKatex } from './MarkdownExportPage/useKatex';
+import { exportToPdf as exportPdfUtil } from './MarkdownExportPage/pdfExport';
 
 // 简单的DOCX导出实现（使用RTF格式作为替代）
 
-// 预加载KaTeX字体以避免慢网络警告
-const preloadKatexFonts = () => {
-    const fonts = [
-        'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/fonts/KaTeX_Main-Regular.woff2',
-        'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/fonts/KaTeX_Math-Italic.woff2',
-        'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/fonts/KaTeX_Size1-Regular.woff2',
-        'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/fonts/KaTeX_Size2-Regular.woff2'
-    ];
-    
-    fonts.forEach(fontUrl => {
-        if (!document.querySelector(`link[href="${fontUrl}"]`)) {
-            const link = document.createElement('link');
-            link.rel = 'preload';
-            link.as = 'font';
-            link.type = 'font/woff2';
-            link.crossOrigin = 'anonymous';
-            link.href = fontUrl;
-            document.head.appendChild(link);
-        }
-    });
-};
-
-// 配置marked以支持KaTeX
-marked.use(markedKatex({
-    nonStandard: true
-}));
+// KaTeX 逻辑已拆分至 useKatex 钩子与独立模块
 
 const MarkdownExportPage: React.FC = () => {
-    const [isKatexLoaded, setIsKatexLoaded] = useState(false);
+    // 使用拆分的 KaTeX 钩子
+    const [isExporting, setIsExporting] = useState(false);
     const [markdownContent, setMarkdownContent] = useState(`# 示例文档
 
 ## 介绍
@@ -91,29 +68,8 @@ c & d
 [链接示例](https://example.com)
 `);
 
-    const [isExporting, setIsExporting] = useState(false);
     const previewRef = useRef<HTMLDivElement>(null);
-
-    // 组件挂载时预加载KaTeX字体
-    useEffect(() => {
-        preloadKatexFonts();
-        
-        // 检查字体是否已加载
-        const checkFontsLoaded = () => {
-            if (document.fonts && document.fonts.ready) {
-                document.fonts.ready.then(() => {
-                    setIsKatexLoaded(true);
-                });
-            } else {
-                // 降级方案：等待一段时间后假设字体已加载
-                setTimeout(() => {
-                    setIsKatexLoaded(true);
-                }, 300);
-            }
-        };
-        
-        checkFontsLoaded();
-    }, []);
+    const isKatexLoaded = useKatex(markdownContent);
 
     // 简单转义函数，避免将纯文本解释为HTML
     const escapeHtml = (text: string) =>
@@ -367,37 +323,7 @@ c & d
         setIsExporting(true);
         try {
             if (!previewRef.current) return;
-
-            const canvas = await html2canvas(previewRef.current, {
-                scale: 2,
-                useCORS: true,
-                allowTaint: true,
-                backgroundColor: '#ffffff'
-            });
-
-            const imgData = canvas.toDataURL('image/png');
-            const pdf = new jsPDF('p', 'mm', 'a4');
-
-            const imgWidth = 210; // A4宽度
-            const pageHeight = 295; // A4高度
-            const imgHeight = (canvas.height * imgWidth) / canvas.width;
-            let heightLeft = imgHeight;
-
-            let position = 0;
-
-            // 添加第一页
-            pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-            heightLeft -= pageHeight;
-
-            // 如果内容超过一页，添加更多页面
-            while (heightLeft >= 0) {
-                position = heightLeft - imgHeight;
-                pdf.addPage();
-                pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-                heightLeft -= pageHeight;
-            }
-
-            pdf.save(`markdown-export-${new Date().getTime()}.pdf`);
+            await exportPdfUtil(previewRef.current);
         } catch (error) {
             console.error('导出PDF失败:', error);
             alert('导出PDF失败，请检查内容格式');
