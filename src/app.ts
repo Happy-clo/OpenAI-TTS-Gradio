@@ -28,6 +28,7 @@ import { tamperProtectionMiddleware } from './middleware/tamperProtection';
 import commandRoutes from './routes/commandRoutes';
 import libreChatRoutes from './routes/libreChatRoutes';
 import dataCollectionRoutes from './routes/dataCollectionRoutes';
+import dataCollectionAdminRoutes from './routes/dataCollectionAdminRoutes';
 import { AuthController, isAdminToken, registerLogoutRoute } from './controllers/authController';
 import { adminController } from 'controllers/adminController';
 import swaggerJSDoc from 'swagger-jsdoc';
@@ -56,7 +57,10 @@ import fbiWantedPublicRoutes from './routes/fbiWantedPublicRoutes';
 import humanCheckRoutes from './routes/humanCheckRoutes';
 
 import emailRoutes from './routes/emailRoutes';
+import outemailRoutes from './routes/outemailRoutes';
 import { commandStatusHandler } from './routes/commandRoutes';
+import webhookRoutes from './routes/webhookRoutes';
+import webhookEventRoutes from './routes/webhookEventRoutes';
 import { authenticateToken } from './middleware/authenticateToken';
 import { totpStatusHandler } from './routes/totpRoutes';
 
@@ -75,6 +79,25 @@ var EMAIL_ENABLED: boolean;
 // 邮件服务状态全局变量
 // eslint-disable-next-line no-var
 var EMAIL_SERVICE_STATUS: { available: boolean; error?: string };
+
+// Synchronous helper for Swagger UI initialization
+const readOpenapiJsonSync = (): string => {
+  const candidates = [
+    process.env.OPENAPI_JSON_PATH && path.resolve(process.env.OPENAPI_JSON_PATH),
+    '/app/openapi.json',
+    path.join(process.cwd(), 'openapi.json'),
+    path.join(__dirname, '../openapi.json'),
+    path.join(process.cwd(), 'dist/openapi.json'),
+  ].filter(Boolean) as string[];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+        return fs.readFileSync(p, 'utf-8');
+      }
+    } catch (_) { /* ignore */ }
+  }
+  throw new Error('openapi.json not found in: ' + candidates.join(' | '));
+};
 // 对外邮件服务状态全局变量
 // eslint-disable-next-line no-var
 var OUTEMAIL_SERVICE_STATUS: { available: boolean; error?: string };
@@ -108,6 +131,9 @@ app.options('/s/*', (req: Request, res: Response) => {
   res.header('Access-Control-Max-Age', '86400');
   res.status(200).end();
 });
+
+// Mount webhook routes BEFORE global JSON parser to preserve raw body for Svix
+app.use('/api/webhooks', webhookRoutes);
 
 // JSON body parser middleware - 必须在短链路由之前
 app.use(express.json({ limit: '10mb' }));
@@ -332,6 +358,8 @@ app.use(isLocalIp); // 添加本地 IP 检查中间件
 
 // 立即注册 emailRoutes，确保 /api/email/outemail 无需 token 验证
 app.use('/api/email', emailRoutes);
+// 单独注册对外邮件公共路由，确保无鉴权访问
+app.use('/api/outemail', outemailRoutes);
 
 // 应用请求限制到不同路由
 app.use('/api/auth', authLimiter);
@@ -608,6 +636,26 @@ const swaggerOptions = {
 };
 const swaggerSpec = swaggerJSDoc(swaggerOptions);
 
+// Helper to load openapi.json from multiple candidate paths
+const readOpenapiJson = async (): Promise<string> => {
+  const candidates = [
+    process.env.OPENAPI_JSON_PATH && path.resolve(process.env.OPENAPI_JSON_PATH),
+    // Docker 默认路径
+    '/app/openapi.json',
+    path.join(process.cwd(), 'openapi.json'),
+    path.join(__dirname, '../openapi.json'),
+    path.join(process.cwd(), 'dist/openapi.json'),
+  ].filter(Boolean) as string[];
+  for (const p of candidates) {
+    try {
+      if (await fs.promises.stat(p).then(s => s.isFile()).catch(() => false)) {
+        return await fs.promises.readFile(p, 'utf-8');
+      }
+    } catch (_) { /* ignore */ }
+  }
+  throw new Error('openapi.json not found in: ' + candidates.join(' | '));
+};
+
 // openapi.json 路由（必须在最前面）
 const openapiLimiter = rateLimit({
   windowMs: 60 * 1000, // 1分钟
@@ -617,7 +665,7 @@ const openapiLimiter = rateLimit({
 app.get('/api/api-docs.json', openapiLimiter, async (req, res) => {
   try {
     res.setHeader('Content-Type', 'application/json');
-    const content = await fs.promises.readFile(path.join(process.cwd(), 'openapi.json'), 'utf-8');
+    const content = await readOpenapiJson();
     res.send(content);
   } catch (error) {
     res.status(500).json({ error: '无法读取API文档' });
@@ -626,20 +674,85 @@ app.get('/api/api-docs.json', openapiLimiter, async (req, res) => {
 app.get('/api-docs.json', openapiLimiter, async (req, res) => {
   try {
     res.setHeader('Content-Type', 'application/json');
-    const content = await fs.promises.readFile(path.join(process.cwd(), 'openapi.json'), 'utf-8');
+    const content = await readOpenapiJson();
     res.send(content);
   } catch (error) {
     res.status(500).json({ error: '无法读取API文档' });
   }
 });
-// Swagger UI 路由
+// 兼容根路径 openapi.json（Swagger UI 在容器中可能直接请求 /openapi.json）
+app.get('/openapi.json', openapiLimiter, async (req, res) => {
+  try {
+    res.setHeader('Content-Type', 'application/json');
+    const content = await readOpenapiJson();
+    res.send(content);
+  } catch (error) {
+    res.status(500).json({ error: '无法读取API文档' });
+  }
+});
+// Swagger UI 路由（优先使用预生成 openapi.json，避免容器中无源码注释导致无路径）
+let swaggerUiSpec: any = swaggerSpec;
+let swaggerLoadReason = 'swagger-jsdoc';
+try {
+  const json = readOpenapiJsonSync();
+  swaggerUiSpec = JSON.parse(json);
+  const pathsCount = swaggerUiSpec && swaggerUiSpec.paths ? Object.keys(swaggerUiSpec.paths).length : 0;
+  logger.info(`[Swagger] Loaded pre-generated openapi.json for UI, paths=${pathsCount}`);
+  swaggerLoadReason = 'pre-generated-openapi.json';
+} catch (e) {
+  logger.warn('[Swagger] Falling back to swagger-jsdoc generated spec. Reason: ' + (e instanceof Error ? e.message : String(e)));
+}
+
+// Decide UI setup mode: if OPENAPI_JSON_PATH is defined or /app/openapi.json exists, let UI fetch /openapi.json directly
+const preferSwaggerUrl = !!process.env.OPENAPI_JSON_PATH || fs.existsSync('/app/openapi.json');
+
+// Override Swagger UI favicon request
+app.get('/api-docs/favicon-32x32.png', (req: Request, res: Response) => {
+  res.redirect(302, 'https://png.hapxs.com/i/2025/08/08/68953253d778d.png');
+});
+app.get('/api-docs/favicon-16x16.png', (req: Request, res: Response) => {
+  res.redirect(302, 'https://png.hapxs.com/i/2025/08/08/68953253d778d.png');
+});
+
 app.use('/api-docs', (req: Request, res: Response, next: NextFunction) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
   res.removeHeader && res.removeHeader('ETag');
   next();
-}, swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+}, swaggerUi.serve, preferSwaggerUrl
+  ? swaggerUi.setup(undefined, {
+    swaggerUrl: '/openapi.json',
+    customSiteTitle: 'Happy API',
+    customCss: `
+      .swagger-ui .topbar .link img,
+      .swagger-ui .topbar .link svg { display: none !important; }
+      .swagger-ui .topbar .link {
+        background-image: url('https://png.hapxs.com/i/2025/08/08/68953253d778d.png');
+        background-repeat: no-repeat;
+        background-position: left center;
+        background-size: auto 40px;
+        height: 50px;
+        padding-left: 150px;
+      }
+    `
+  })
+  : swaggerUi.setup(swaggerUiSpec, {
+    customSiteTitle: 'Happy API',
+    customCss: `
+      .swagger-ui .topbar .link img,
+      .swagger-ui .topbar .link svg { display: none !important; }
+      .swagger-ui .topbar .link {
+        background-image: url('https://png.hapxs.com/i/2025/08/08/68953253d778d.png');
+        background-repeat: no-repeat;
+        background-position: left center;
+        background-size: auto 40px;
+        height: 50px;
+        padding-left: 150px;
+      }
+    `
+  })
+);
 
 // 音频文件服务限流器
 const audioFileLimiter = rateLimit({
@@ -684,6 +797,7 @@ app.use('/api/tamper', tamperRoutes);
 app.use('/api/command', commandRoutes);
 app.use('/api/libre-chat', libreChatRoutes);
 app.use('/api/data-collection', dataCollectionRoutes);
+app.use('/api/data-collection/admin', dataCollectionAdminRoutes);
 app.use('/api/ipfs', ipfsRoutes);
 app.use('/api/network', networkRoutes);
 app.use('/api/data', dataProcessRoutes);
@@ -696,18 +810,35 @@ app.use('/api/passkey', passkeyAutoFixMiddleware);
 app.use('/api/passkey', passkeyRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api/miniapi', miniapiLimiter, miniapiRoutes);
-app.use('/api/modlist', modlistRoutes);
+// 额外在挂载点增加一层限流，叠加路由内部限流，缓解扫接口类滥用
+const modlistMountLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 60,
+  message: { error: 'MOD列表请求过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/modlist', modlistMountLimiter, modlistRoutes);
 app.use('/api/image-data', imageDataRoutes);
 // 资源路由 - 部分需要认证
 app.use('/api', resourceRoutes);
-// CDK路由 - 需要认证
-app.use('/api', authenticateToken, cdkRoutes);
-// FBI通缉犯路由
-app.use('/api/fbi-wanted', fbiWantedRoutes);
-// FBI通缉犯公开路由（完全无鉴权）
-app.use('/api/fbi-wanted-public', fbiWantedPublicRoutes);
-// 额外公开别名（非 /api 前缀，绕过任何潜在的 /api 层鉴权拦截）
-app.use('/public/fbi-wanted', fbiWantedPublicRoutes);
+// CDK路由 - 需要认证（添加挂载限流）
+const cdkMountLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 60, // 每IP每分钟最多60次
+  message: { error: 'CDK 请求过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api', cdkMountLimiter, authenticateToken, cdkRoutes);
+// Webhook事件管理 - 需要管理员认证（添加管理员限流）
+app.use('/api/webhook-events', authenticateToken, adminLimiter, webhookEventRoutes);
+// FBI通缉犯路由（管理员端，添加管理员限流）
+app.use('/api/fbi-wanted', adminLimiter, fbiWantedRoutes);
+// FBI通缉犯公开路由（完全无鉴权，添加前端限流）
+app.use('/api/fbi-wanted-public', frontendLimiter, fbiWantedPublicRoutes);
+// 额外公开别名（非 /api 前缀，绕过任何潜在的 /api 层鉴权拦截）- 添加前端限流
+app.use('/public/fbi-wanted', frontendLimiter, fbiWantedPublicRoutes);
 // app.use('/api', shortUrlRoutes);
 
 // 完整性检测相关兜底接口限速
@@ -736,10 +867,36 @@ const rootLimiter = rateLimit({
   skip: (req: Request): boolean => req.isLocalIp || false
 });
 
-// 根路由重定向到前端
+// 根路由重定向到前端站点
 app.get('/', rootLimiter, (req, res) => {
-  res.redirect('/index.html');
+  res.redirect('http://tts.hapxs.com/');
 });
+
+// 兼容旧路径：直接访问 /lc 与 /librechat-image
+const lcCompatLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: '请求过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.get('/lc', lcCompatLimiter, (req, res) => {
+  try {
+    const { libreChatService } = require('./services/libreChatService');
+    const record = libreChatService.getLatestRecord();
+    if (record) {
+      return res.json({
+        update_time: record.updateTime,
+        image_name: record.imageUrl,
+        update_time_shanghai: record.updateTimeShanghai,
+      });
+    }
+    return res.status(404).json({ error: 'No data available.' });
+  } catch (e) {
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+app.get('/librechat-image', lcCompatLimiter, (req, res) => res.redirect(302, '/api/libre-chat/librechat-image'));
 
 // IP查询路由限流器
 const ipQueryLimiter = rateLimit({
@@ -859,16 +1016,57 @@ const staticFileLimiter = rateLimit({
   skip: (req: Request): boolean => req.isLocalIp || false
 });
 
-// 静态文件服务
-const frontendPath = join(__dirname, '../frontend/dist');
-if (existsSync(frontendPath)) {
-  app.use('/static', staticFileLimiter, express.static(frontendPath));
+// 静态文件服务（兼容 Docker 镜像路径）
+const frontendCandidates = [
+  process.env.FRONTEND_DIST_DIR && path.resolve(process.env.FRONTEND_DIST_DIR),
+  join(__dirname, '../frontend/dist'),
+  join(__dirname, '../../frontend/dist'),
+  path.resolve(process.cwd(), 'frontend/dist'),
+].filter(Boolean) as string[];
+
+const resolvedFrontendPath = frontendCandidates.find(p => existsSync(p));
+
+if (resolvedFrontendPath) {
+  logger.info('[Frontend] Serving static files from: ' + resolvedFrontendPath);
+  app.use('/static', staticFileLimiter, express.static(resolvedFrontendPath));
   // 前端 SPA 路由 - 只匹配非 /api /api-docs /static /openapi 开头的路径
   app.get(/^\/(?!api|api-docs|static|openapi)(.*)/, frontendLimiter, (req, res) => {
-    res.sendFile(join(frontendPath, 'index.html'));
+    res.sendFile(join(resolvedFrontendPath, 'index.html'));
   });
 } else {
-  logger.warn('Frontend files not found at:', frontendPath);
+  const expected = frontendCandidates.join(' | ');
+  logger.warn('[Frontend] Frontend files not found at any candidate path. Tried: ' + expected);
+  // 提供降级首页，确保 Docker 镜像在无前端构建文件时也可使用 Swagger
+  app.get('/index.html', (req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.status(200).send(`<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Happy-TTS API</title>
+    <style>
+      body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:40px;line-height:1.6}
+      .card{max-width:680px;margin:0 auto;border:1px solid #e5e7eb;border-radius:12px;padding:24px;box-shadow:0 4px 14px rgba(0,0,0,.08)}
+      h1{margin:0 0 12px;font-size:24px}
+      a{color:#3b82f6;text-decoration:none}
+      code{background:#f3f4f6;padding:2px 6px;border-radius:6px}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Happy-TTS 后端已启动</h1>
+      <p>未检测到前端构建文件。您仍可通过 Swagger 访问 API 文档：</p>
+      <ul>
+        <li><a href="/api-docs" rel="noopener">Swagger UI</a></li>
+        <li><a href="/api-docs.json" rel="noopener">Swagger JSON</a></li>
+        <li><a href="/api/api-docs.json" rel="noopener">Swagger JSON (alt)</a></li>
+      </ul>
+      <p>如果需要启用前端，请设置环境变量 <code>FRONTEND_DIST_DIR</code> 或将构建产物放到以下任一路径：<br/><small>${expected}</small></p>
+    </div>
+  </body>
+</html>`);
+  });
 }
 
 // 文档加载超时上报接口限流器
@@ -1381,7 +1579,12 @@ function wafCheckSimple(str: string, maxLen = 256): boolean {
   return true;
 }
 app.use((req: Request, res: Response, next: NextFunction) => {
-  if (!req.path.startsWith('/api/') || req.path === '/api/auth/login' || req.path === '/api/auth/register') return next();
+  if (
+    !req.path.startsWith('/api/') ||
+    req.path === '/api/auth/login' ||
+    req.path === '/api/auth/register' ||
+    req.path === '/api/webhooks/resend'
+  ) return next();
   const ip = req.ip || (req.socket?.remoteAddress) || 'unknown';
   const now = Date.now();
   const rec = wafSkipMap.get(ip) || { last: 0, count: 0 };
