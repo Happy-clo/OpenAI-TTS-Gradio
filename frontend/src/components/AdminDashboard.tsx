@@ -14,10 +14,12 @@ const WebhookEventsManager = React.lazy(() => import('./WebhookEventsManager'));
 const LogShare = React.lazy(() => import('./LogShare'));
 const FBIWantedManager = React.lazy(() => import('./FBIWantedManager'));
 const DataCollectionManager = React.lazy(() => import('./DataCollectionManager'));
+const LibreChatAdminPage = React.lazy(() => import('./LibreChatAdminPage'));
 import { useAuth } from '../hooks/useAuth';
 import { useNotification } from './Notification';
 import { getApiBaseUrl } from '../api/api';
 import { FaCog, FaUsers, FaShieldAlt } from 'react-icons/fa';
+const SmartHumanCheckTraces = React.lazy(() => import('./SmartHumanCheckTraces'));
 
 const AdminDashboard: React.FC = () => {
   const [tab, setTab] = useState('users');
@@ -29,6 +31,7 @@ const AdminDashboard: React.FC = () => {
 
   const tabs = useMemo(() => ([
     { key: 'users', label: '用户管理' },
+    { key: 'librechat', label: 'LibreChat 管理' },
     { key: 'announcement', label: '公告管理' },
     { key: 'env', label: '环境变量' },
     { key: 'lottery', label: '抽奖管理' },
@@ -37,6 +40,7 @@ const AdminDashboard: React.FC = () => {
     { key: 'shortlink', label: '短链管理' },
     { key: 'shorturlmigration', label: '短链迁移' },
     { key: 'command', label: '命令管理' },
+    { key: 'humancheck', label: '人机验证日志' },
     { key: 'logshare', label: '日志分享' },
     { key: 'fbiwanted', label: 'FBI通缉犯管理' },
     { key: 'webhookevents', label: 'Webhook事件' },
@@ -315,6 +319,19 @@ const AdminDashboard: React.FC = () => {
                     <UserManagement />
                   </motion.div>
                 )}
+                {tab === 'librechat' && (
+                  <motion.div
+                    key="librechat"
+                    initial={{ opacity: 0, x: 40 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -40 }}
+                    transition={{ duration: 0.25 }}
+                  >
+                    <Suspense fallback={<div className="text-gray-400">加载中…</div>}>
+                      <LibreChatAdminPage />
+                    </Suspense>
+                  </motion.div>
+                )}
                 {tab === 'announcement' && (
                   <motion.div
                     key="announcement"
@@ -429,6 +446,19 @@ const AdminDashboard: React.FC = () => {
                   >
                     <Suspense fallback={<div className="text-gray-400">加载中…</div>}>
                       <CommandManager />
+                    </Suspense>
+                  </motion.div>
+                )}
+                {tab === 'humancheck' && (
+                  <motion.div
+                    key="humancheck"
+                    initial={{ opacity: 0, x: 40 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -40 }}
+                    transition={{ duration: 0.25 }}
+                  >
+                    <Suspense fallback={<div className="text-gray-400">加载中…</div>}>
+                      <SmartHumanCheckTraces />
                     </Suspense>
                   </motion.div>
                 )}
