@@ -3,6 +3,9 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
+// 禁用 Git 信息读取，避免在无 .git 环境下的构建警告
+if (!process.env.DOCUSAURUS_DISABLE_GIT_INFO) process.env.DOCUSAURUS_DISABLE_GIT_INFO = 'true';
+if (!process.env.DISABLE_GIT_INFO) process.env.DISABLE_GIT_INFO = 'true';
 
 const config: Config = {
   title: 'Happy-TTS API 文档',
@@ -64,6 +67,9 @@ const config: Config = {
             type: 'all',
             copyright: `Copyright © ${new Date().getFullYear()} Happy-TTS`,
           },
+          // 忽略未在 authors.yml 定义的内联作者和未添加截断标记的博文警告
+          onInlineAuthors: 'ignore',
+          onUntruncatedBlogPosts: 'ignore',
         },
       } satisfies Preset.Options,
     ],
@@ -161,7 +167,7 @@ const config: Config = {
 
   // 添加插件配置
   plugins: [
-    // 可以添加自定义插件
+    require.resolve('./plugins/email-protection'),
   ],
 
   // 添加主题配置
@@ -173,6 +179,7 @@ const config: Config = {
     require.resolve('./src/clientModules/fixNavbar.js'),
     require.resolve('./src/clientModules/scrollNavbar.js'),
     require.resolve('./src/clientModules/routeModules.js'),
+    require.resolve('./src/clientModules/emailProtection.js'),
   ],
 };
 

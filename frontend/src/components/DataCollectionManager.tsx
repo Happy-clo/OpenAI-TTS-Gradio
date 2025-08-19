@@ -1,14 +1,22 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useDeferredValue, useCallback, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { getApiBaseUrl } from '../api/api';
-import { FaChartBar, FaSync, FaSearch, FaRedo, FaTrash, FaEye, FaTimes, FaPlus } from 'react-icons/fa';
+import { FaChartBar, FaSync, FaSearch, FaRedo, FaTrash, FaEye, FaTimes, FaPlus, FaClipboard, FaCopy } from 'react-icons/fa';
 import { useNotification } from './Notification';
+import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import jsonLang from 'react-syntax-highlighter/dist/esm/languages/prism/json';
+import jsLang from 'react-syntax-highlighter/dist/esm/languages/prism/javascript';
+
+SyntaxHighlighter.registerLanguage('json', jsonLang);
+SyntaxHighlighter.registerLanguage('javascript', jsLang);
 
 interface Item {
     _id: string;
     userId: string;
     action: string;
     timestamp: string;
+    hash?: string;
     details?: any;
 }
 
@@ -17,6 +25,100 @@ type SortOrder = 'asc' | 'desc';
 const jsonPretty = (obj: any) => {
     try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
 };
+
+// Memoized desktop row
+const DataRow = React.memo(({ item, checked, onToggle, onView, onDelete }: {
+    item: Item; checked: boolean; onToggle: (id: string) => void; onView: (it: Item) => void; onDelete: (id: string) => void;
+}) => {
+    const { setNotification } = useNotification();
+    return (
+        <tr className="border-t border-gray-100 hover:bg-gray-50">
+            <td className="p-3"><input type="checkbox" checked={checked} onChange={() => onToggle(item._id)} /></td>
+            <td className="p-3 whitespace-nowrap">{new Date(item.timestamp).toLocaleString('zh-CN')}</td>
+            <td className="p-3 break-words whitespace-normal" title={item.userId}>{item.userId}</td>
+            <td className="p-3">
+                <div className="flex items-center gap-2">
+                    <span className="break-all font-mono flex-1" title={item._id}>{item._id}</span>
+                    <button
+                        className="inline-flex items-center justify-center w-5 h-5 rounded bg-gray-100 hover:bg-gray-200 text-gray-700"
+                        title="复制ID"
+                        onClick={async (e) => {
+                            e.stopPropagation();
+                            try {
+                                await navigator.clipboard.writeText(item._id);
+                                setNotification({ type: 'success', message: 'ID 已复制' });
+                            } catch (err: any) {
+                                setNotification({ type: 'error', message: err?.message || '复制失败' });
+                            }
+                        }}
+                    >
+                        <FaCopy className="w-3 h-3" />
+                    </button>
+                </div>
+            </td>
+            <td className="p-3 break-words whitespace-normal" title={item.action}>{item.action}</td>
+            <td className="p-3">
+                <div className="flex flex-wrap gap-2">
+                    <button className="px-2 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-xs font-medium flex items-center gap-2" onClick={() => onView(item)}>
+                        <FaEye className="w-3.5 h-3.5" /> 查看
+                    </button>
+                    <button className="px-2 py-1 rounded-lg bg-red-500 text-white hover:bg-red-600 text-xs font-medium" onClick={() => onDelete(item._id)}>
+                        删除
+                    </button>
+                </div>
+            </td>
+        </tr>
+    );
+});
+
+// Memoized mobile card
+const DataCard = React.memo(({ item, checked, onToggle, onView, onDelete }: {
+    item: Item; checked: boolean; onToggle: (id: string) => void; onView: (it: Item) => void; onDelete: (id: string) => void;
+}) => {
+    const { setNotification } = useNotification();
+    return (
+        <div className="p-4">
+            <div className="flex items-start gap-3">
+                <input type="checkbox" className="mt-1 flex-shrink-0" checked={checked} onChange={() => onToggle(item._id)} />
+                <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-100 text-indigo-700" title={item.action}>动作</span>
+                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-mono bg-gray-100 text-gray-700 break-words whitespace-normal max-w-full" title={item.action}>{item.action}</span>
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">{new Date(item.timestamp).toLocaleString('zh-CN')}</div>
+                    <div className="text-xs text-gray-600 mt-1 break-words whitespace-normal" title={item.userId}>用户：{item.userId || '-'}</div>
+                    <div className="text-[10px] text-gray-600 mt-1 font-mono flex items-center gap-1" title={item._id}>
+                        <span className="text-gray-500 flex-shrink-0">ID：</span>
+                        <span className="break-all flex-1">{item._id}</span>
+                        <button
+                            className="inline-flex items-center justify-center w-5 h-5 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 flex-shrink-0"
+                            onClick={async (e) => {
+                                e.stopPropagation();
+                                try {
+                                    await navigator.clipboard.writeText(item._id);
+                                    setNotification({ type: 'success', message: 'ID 已复制' });
+                                } catch (err: any) {
+                                    setNotification({ type: 'error', message: err?.message || '复制失败' });
+                                }
+                            }}
+                            title="复制ID"
+                        >
+                            <FaCopy className="w-3 h-3" />
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+                <button className="w-full px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-xs font-medium flex items-center justify-center gap-1" onClick={() => onView(item)}>
+                    <FaEye className="w-3.5 h-3.5" /> 查看
+                </button>
+                <button className="w-full px-3 py-2 rounded-lg bg-red-500 text-white hover:bg-red-600 text-xs font-medium" onClick={() => onDelete(item._id)}>
+                    删除
+                </button>
+            </div>
+        </div>
+    );
+});
 
 const DataCollectionManager: React.FC = () => {
     const [page, setPage] = useState(1);
@@ -32,6 +134,8 @@ const DataCollectionManager: React.FC = () => {
     const [stats, setStats] = useState<any>(null);
     const [selected, setSelected] = useState<Set<string>>(new Set());
     const [viewItem, setViewItem] = useState<Item | null>(null);
+    const [batchLoading, setBatchLoading] = useState(false);
+    const [batchView, setBatchView] = useState<null | { ids: string[]; items: any[] }>(null);
     // Create modal state
     const [creating, setCreating] = useState(false);
     const [newUserId, setNewUserId] = useState('');
@@ -40,6 +144,10 @@ const DataCollectionManager: React.FC = () => {
     const [newDetailsRaw, setNewDetailsRaw] = useState(''); // string or JSON text
     const base = getApiBaseUrl();
     const { setNotification } = useNotification();
+
+    // Abort controllers
+    const listAbortRef = useRef<AbortController | null>(null);
+    const statsAbortRef = useRef<AbortController | null>(null);
 
     const buildHeaders = (): HeadersInit => {
         const token = localStorage.getItem('token');
@@ -90,8 +198,12 @@ const DataCollectionManager: React.FC = () => {
         }
     };
 
-    const fetchList = async () => {
+    const fetchList = useCallback(async () => {
         setLoading(true);
+        // cancel previous
+        if (listAbortRef.current) listAbortRef.current.abort();
+        const aborter = new AbortController();
+        listAbortRef.current = aborter;
         try {
             const params = new URLSearchParams();
             params.set('page', String(page));
@@ -103,6 +215,7 @@ const DataCollectionManager: React.FC = () => {
             if (end) params.set('end', new Date(end).toISOString());
             const res = await fetch(`${base}/api/data-collection/admin?${params.toString()}`, {
                 headers: buildHeaders(),
+                signal: aborter.signal,
             });
             if (res.status === 401) {
                 setNotification({ type: 'error', message: '未授权或登录已过期，请重新登录' });
@@ -112,17 +225,21 @@ const DataCollectionManager: React.FC = () => {
             if (!res.ok || data.success === false) throw new Error(data.message || '加载失败');
             setItems(data.items || []);
             setTotal(data.total || 0);
-        } catch (e) {
-            console.error('[DataCollectionManager] list error', e);
+        } catch (e: any) {
+            if (e?.name !== 'AbortError') console.error('[DataCollectionManager] list error', e);
         } finally {
             setLoading(false);
         }
-    };
+    }, [base, page, limit, sort, userId, action, start, end, setNotification]);
 
-    const fetchStats = async () => {
+    const fetchStats = useCallback(async () => {
+        if (statsAbortRef.current) statsAbortRef.current.abort();
+        const aborter = new AbortController();
+        statsAbortRef.current = aborter;
         try {
             const res = await fetch(`${base}/api/data-collection/admin/stats`, {
                 headers: buildHeaders(),
+                signal: aborter.signal,
             });
             if (res.status === 401) {
                 setNotification({ type: 'error', message: '未授权或登录已过期，请重新登录' });
@@ -130,19 +247,26 @@ const DataCollectionManager: React.FC = () => {
             }
             const data = await res.json();
             if (res.ok && data.success !== false) setStats(data.data);
-        } catch (e) {
-            console.error('[DataCollectionManager] stats error', e);
+        } catch (e: any) {
+            if (e?.name !== 'AbortError') console.error('[DataCollectionManager] stats error', e);
         }
-    };
+    }, [base, setNotification]);
 
     useEffect(() => {
         fetchList();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [page, limit, sort]);
+    }, [page, limit, sort, userId, action, start, end]);
 
     useEffect(() => {
         fetchStats();
         // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            if (listAbortRef.current) listAbortRef.current.abort();
+            if (statsAbortRef.current) statsAbortRef.current.abort();
+        };
     }, []);
 
     const totalPages = Math.max(1, Math.ceil(total / Math.max(1, limit)));
@@ -152,13 +276,17 @@ const DataCollectionManager: React.FC = () => {
         else setSelected(new Set(items.map(i => i._id)));
     };
 
-    const toggleOne = (id: string) => {
-        const next = new Set(selected);
-        if (next.has(id)) next.delete(id); else next.add(id);
-        setSelected(next);
-    };
+    const toggleOne = useCallback((id: string) => {
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    }, []);
 
-    const deleteOne = async (id: string) => {
+    const deferredItems = useDeferredValue(items);
+
+    const deleteOne = useCallback(async (id: string) => {
         if (!confirm('确认删除该记录？')) return;
         try {
             const res = await fetch(`${base}/api/data-collection/admin/${id}`, {
@@ -176,7 +304,7 @@ const DataCollectionManager: React.FC = () => {
         } catch (e) {
             setNotification({ type: 'error', message: '删除失败' });
         }
-    };
+    }, [base, fetchList, setNotification]);
 
     const deleteBatch = async () => {
         const ids = Array.from(selected);
@@ -200,6 +328,74 @@ const DataCollectionManager: React.FC = () => {
             setNotification({ type: 'error', message: '批量删除失败' });
         }
     };
+
+    // 选择与聚合辅助
+    const requireSelection = (): string[] | null => {
+        const ids = Array.from(selected);
+        if (!ids.length) {
+            setNotification({ type: 'warning', message: '请先选择要操作的记录' });
+            return null;
+        }
+        return ids;
+    };
+
+    const copySelectedIds = async () => {
+        const ids = requireSelection();
+        if (!ids) return;
+        try {
+            await navigator.clipboard.writeText(ids.join('\n'));
+            setNotification({ type: 'success', message: `已复制 ${ids.length} 个ID` });
+        } catch (e: any) {
+            setNotification({ type: 'error', message: e?.message || '复制失败' });
+        }
+    };
+
+    const fetchDetailsByIds = async (ids: string[]) => {
+        const results: any[] = [];
+        for (const id of ids) {
+            try {
+                const res = await fetch(`${base}/api/data-collection/admin/${id}`, { headers: buildHeaders() });
+                const data = await res.json();
+                if (res.ok && data?.success !== false && data?.data) results.push(data.data);
+                else results.push({ _id: id, error: data?.message || 'not_ok' });
+            } catch (e: any) {
+                results.push({ _id: id, error: e?.message || 'fetch_error' });
+            }
+        }
+        return results;
+    };
+
+    const viewSelectedLogs = async () => {
+        const ids = requireSelection();
+        if (!ids) return;
+        setBatchLoading(true);
+        try {
+            const details = await fetchDetailsByIds(ids);
+            setBatchView({ ids, items: details });
+        } catch (e: any) {
+            setNotification({ type: 'error', message: e?.message || '加载日志失败' });
+        } finally {
+            setBatchLoading(false);
+        }
+    };
+
+    const copySelectedLogs = async () => {
+        const ids = requireSelection();
+        if (!ids) return;
+        setBatchLoading(true);
+        try {
+            const details = await fetchDetailsByIds(ids);
+            const text = JSON.stringify({ ids, items: details }, null, 2);
+            await navigator.clipboard.writeText(text);
+            setNotification({ type: 'success', message: `已复制 ${ids.length} 条日志 JSON` });
+        } catch (e: any) {
+            setNotification({ type: 'error', message: e?.message || '复制失败' });
+        } finally {
+            setBatchLoading(false);
+        }
+    };
+
+    const onView = useCallback((it: Item) => setViewItem(it), []);
 
     return (
         <div className="max-w-7xl mx-auto px-4 space-y-6">
@@ -237,6 +433,38 @@ const DataCollectionManager: React.FC = () => {
                             className="w-full sm:w-auto px-3 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-medium flex items-center gap-2"
                         >
                             <FaPlus className="w-4 h-4" /> 新增记录
+                        </button>
+                        <button onClick={viewSelectedLogs} disabled={batchLoading || selected.size === 0} className="w-full sm:w-auto px-3 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-medium flex items-center gap-2">
+                          <FaEye className="w-4 h-4" /> 查看合并
+                        </button>
+                        <button onClick={copySelectedIds} disabled={selected.size === 0} className="w-full sm:w-auto px-3 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-medium flex items-center gap-2">
+                          <FaCopy className="w-4 h-4" /> 复制ID
+                        </button>
+                        <button onClick={copySelectedLogs} disabled={batchLoading || selected.size === 0} className="w-full sm:w-auto px-3 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-medium flex items-center gap-2">
+                          <FaClipboard className="w-4 h-4" /> 一键复制日志
+                        </button>
+                        <button
+                            onClick={async () => {
+                                if (!confirm('确认删除全部数据收集记录？该操作不可恢复。')) return;
+                                try {
+                                    const res = await fetch(`${base}/api/data-collection/admin/all`, {
+                                        method: 'DELETE',
+                                        headers: buildHeaders(),
+                                        body: JSON.stringify({ confirm: true })
+                                    });
+                                    const data = await res.json();
+                                    if (!res.ok || data.success === false) throw new Error(data.message || '删除失败');
+                                    setNotification({ type: 'success', message: `已删除 ${data.deletedCount || 0} 条记录` });
+                                    setSelected(new Set());
+                                    setPage(1);
+                                    await fetchList();
+                                } catch (e: any) {
+                                    setNotification({ type: 'error', message: e?.message || '删除失败' });
+                                }
+                            }}
+                            className="w-full sm:w-auto px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium flex items-center gap-2"
+                        >
+                            <FaTrash className="w-4 h-4" /> 删除全部
                         </button>
                     </div>
                 </div>
@@ -328,30 +556,10 @@ const DataCollectionManager: React.FC = () => {
 
                 {/* Mobile Cards */}
                 <div className="block md:hidden divide-y divide-gray-100">
-                    {items.map(item => (
-                        <div key={item._id} className="p-4">
-                            <div className="flex items-start gap-3">
-                                <input type="checkbox" className="mt-1 flex-shrink-0" checked={selected.has(item._id)} onChange={() => toggleOne(item._id)} />
-                                <div className="min-w-0 flex-1">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-100 text-indigo-700" title={item.action}>动作</span>
-                                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono bg-gray-100 text-gray-700 max-w-[60%] truncate" title={item.action}>{item.action}</span>
-                                    </div>
-                                    <div className="text-xs text-gray-500 mt-1">{new Date(item.timestamp).toLocaleString('zh-CN')}</div>
-                                    <div className="text-xs text-gray-600 mt-1 truncate" title={item.userId}>用户：{item.userId || '-'}</div>
-                                </div>
-                            </div>
-                            <div className="mt-3 grid grid-cols-2 gap-2">
-                                <button className="w-full px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-xs font-medium flex items-center justify-center gap-1" onClick={() => setViewItem(item)}>
-                                    <FaEye className="w-3.5 h-3.5" /> 查看
-                                </button>
-                                <button className="w-full px-3 py-2 rounded-lg bg-red-500 text-white hover:bg-red-600 text-xs font-medium" onClick={() => deleteOne(item._id)}>
-                                    删除
-                                </button>
-                            </div>
-                        </div>
+                    {deferredItems.map(item => (
+                        <DataCard key={item._id} item={item} checked={selected.has(item._id)} onToggle={toggleOne} onView={onView} onDelete={deleteOne} />
                     ))}
-                    {items.length === 0 && (
+                    {deferredItems.length === 0 && (
                         <div className="p-6 text-center text-gray-400">{loading ? '加载中…' : '暂无数据'}</div>
                     )}
                 </div>
@@ -364,31 +572,17 @@ const DataCollectionManager: React.FC = () => {
                                 <th className="p-3 text-left w-10"><input type="checkbox" checked={allChecked} onChange={toggleAll} /></th>
                                 <th className="p-3 text-left w-44">时间</th>
                                 <th className="p-3 text-left w-56">用户</th>
+                                <th className="p-3 text-left w-72">ID</th>
                                 <th className="p-3 text-left w-56">动作</th>
                                 <th className="p-3 text-left w-48">操作</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {items.map(item => (
-                                <tr key={item._id} className="border-t border-gray-100 hover:bg-gray-50">
-                                    <td className="p-3"><input type="checkbox" checked={selected.has(item._id)} onChange={() => toggleOne(item._id)} /></td>
-                                    <td className="p-3 whitespace-nowrap">{new Date(item.timestamp).toLocaleString('zh-CN')}</td>
-                                    <td className="p-3 truncate" title={item.userId}>{item.userId}</td>
-                                    <td className="p-3 truncate" title={item.action}>{item.action}</td>
-                                    <td className="p-3">
-                                        <div className="flex flex-wrap gap-2">
-                                            <button className="px-2 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-xs font-medium flex items-center gap-2" onClick={() => setViewItem(item)}>
-                                                <FaEye className="w-3.5 h-3.5" /> 查看
-                                            </button>
-                                            <button className="px-2 py-1 rounded-lg bg-red-500 text-white hover:bg-red-600 text-xs font-medium" onClick={() => deleteOne(item._id)}>
-                                                删除
-                                            </button>
-                                        </div>
-                                    </td>
-                                </tr>
+                            {deferredItems.map(item => (
+                                <DataRow key={item._id} item={item} checked={selected.has(item._id)} onToggle={toggleOne} onView={onView} onDelete={deleteOne} />
                             ))}
-                            {items.length === 0 && (
-                                <tr><td className="p-6 text-center text-gray-400" colSpan={5}>{loading ? '加载中…' : '暂无数据'}</td></tr>
+                            {deferredItems.length === 0 && (
+                                <tr><td className="p-6 text-center text-gray-400" colSpan={6}>{loading ? '加载中…' : '暂无数据'}</td></tr>
                             )}
                         </tbody>
                     </table>
@@ -415,11 +609,117 @@ const DataCollectionManager: React.FC = () => {
                     >
                         <div className="flex items-center justify-between mb-3">
                             <div className="font-semibold text-gray-900">记录详情</div>
-                            <button className="px-3 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-medium flex items-center gap-2" onClick={() => setViewItem(null)}>
-                                <FaTimes className="w-4 h-4" /> 关闭
-                            </button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await navigator.clipboard.writeText(JSON.stringify(viewItem, null, 2));
+                                    setNotification({ type: 'success', message: '已复制' });
+                                  } catch (e: any) {
+                                    setNotification({ type: 'error', message: e?.message || '复制失败' });
+                                  }
+                                }}
+                                className="px-3 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-medium flex items-center gap-2"
+                              >
+                                <FaClipboard className="w-4 h-4" /> 复制
+                              </button>
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    const id = (viewItem as any)?._id || '';
+                                    if (!id) { setNotification({ type: 'warning', message: '无ID可复制' }); return; }
+                                    await navigator.clipboard.writeText(String(id));
+                                    setNotification({ type: 'success', message: 'ID 已复制' });
+                                  } catch (e: any) {
+                                    setNotification({ type: 'error', message: e?.message || '复制失败' });
+                                  }
+                                }}
+                                className="px-3 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-medium flex items-center gap-2"
+                              >
+                                <FaCopy className="w-4 h-4" /> 复制ID
+                              </button>
+                              <button className="px-3 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-medium flex items-center gap-2" onClick={() => setViewItem(null)}>
+                                  <FaTimes className="w-4 h-4" /> 关闭
+                              </button>
+                            </div>
                         </div>
-                        <pre className="text-xs whitespace-pre-wrap bg-gray-900 text-gray-100 p-3 rounded-md overflow-auto">{jsonPretty(viewItem)}</pre>
+                        <div className="mb-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-gray-700">
+                            <div>
+                                <span className="text-gray-500">ID：</span>
+                                <span className="font-mono break-all">{(viewItem as any)?._id || '-'}</span>
+                            </div>
+                            <div>
+                                <span className="text-gray-500">时间：</span>
+                                <span className="font-mono">{(() => { try { return new Date((viewItem as any)?.timestamp).toLocaleString('zh-CN'); } catch { return String((viewItem as any)?.timestamp || '-') } })()}</span>
+                            </div>
+                            <div>
+                                <span className="text-gray-500">Hash：</span>
+                                <span className="font-mono break-all">{(viewItem as any)?.hash || '-'}</span>
+                            </div>
+                            <div>
+                                <span className="text-gray-500">动作：</span>
+                                <span className="font-mono break-all">{(viewItem as any)?.action || '-'}</span>
+                            </div>
+                        </div>
+                        {(() => {
+                            const raw: any = (viewItem as any)?.details?.payload?.raw_data;
+                            if (typeof raw === 'string') {
+                                let txt = String(raw)
+                                    .replace(/\r\n?/g, '\n');
+                                let lang: any = 'javascript';
+                                let t = txt.trim();
+
+                                // 解析代码围栏 ```lang\n...\n```
+                                if (t.startsWith('```')) {
+                                    const firstNl = t.indexOf('\n');
+                                    const firstLine = firstNl !== -1 ? t.slice(0, firstNl) : t;
+                                    const label = firstLine.replace(/^```/, '').trim().toLowerCase();
+                                    const aliasMap: Record<string, string> = {
+                                      js: 'javascript', javascript: 'javascript', node: 'javascript', mjs: 'javascript', cjs: 'javascript',
+                                      ts: 'javascript', typescript: 'javascript',
+                                      tsx: 'javascript', jsx: 'javascript',
+                                      tsreact: 'javascript', typescriptreact: 'javascript', javascriptreact: 'javascript',
+                                      java: 'javascript', json: 'json', jsonc: 'json'
+                                    };
+                                    if (label && aliasMap[label]) lang = aliasMap[label];
+                                    const rest = firstNl !== -1 ? t.slice(firstNl + 1) : '';
+                                    t = rest.endsWith('```') ? rest.slice(0, -3).trimEnd() : rest;
+                                    txt = t;
+                                }
+
+                                // JSON 自动检测与美化（若未由围栏指定语言）
+                                if (lang === 'javascript') {
+                                    const tt = t.trim();
+                                    if ((tt.startsWith('{') && tt.endsWith('}')) || (tt.startsWith('[') && tt.endsWith(']'))) {
+                                        try {
+                                            txt = JSON.stringify(JSON.parse(t), null, 2);
+                                            lang = 'json';
+                                        } catch {}
+                                    }
+                                }
+
+                                return (
+                                    <SyntaxHighlighter
+                                        language={lang}
+                                        style={vscDarkPlus}
+                                        wrapLongLines
+                                        customStyle={{ background: '#1e1e1e', borderRadius: '0.5rem', maxHeight: '70vh' }}
+                                    >
+                                        {txt}
+                                    </SyntaxHighlighter>
+                                );
+                            }
+                            return (
+                                <SyntaxHighlighter
+                                    language={'json'}
+                                    style={vscDarkPlus}
+                                    wrapLongLines
+                                    customStyle={{ background: '#1e1e1e', borderRadius: '0.5rem', maxHeight: '70vh' }}
+                                >
+                                    {jsonPretty(viewItem)}
+                                </SyntaxHighlighter>
+                            );
+                        })()}
                     </motion.div>
                 </div>
             )}
@@ -464,6 +764,28 @@ const DataCollectionManager: React.FC = () => {
                         </div>
                     </motion.div>
                 </div>
+            )}
+
+            {/* Batch View Modal */}
+            {batchView && (
+              <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setBatchView(null)}>
+                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="w-[95vw] max-w-5xl max-h-[80vh] overflow-auto rounded-2xl bg-white/90 backdrop-blur p-4 sm:p-6 border border-white/20 shadow-xl" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="font-semibold text-gray-900">合并日志（{batchView.ids.length} 条）</div>
+                    <div className="flex items-center gap-2">
+                      <button onClick={async ()=>{ try { await navigator.clipboard.writeText(JSON.stringify(batchView, null, 2)); setNotification({ type:'success', message:'已复制' }); } catch(e:any){ setNotification({ type:'error', message:e?.message||'复制失败' }); } }} className="px-3 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-medium flex items-center gap-2">
+                        <FaClipboard className="w-4 h-4" /> 复制
+                      </button>
+                      <button onClick={() => setBatchView(null)} className="px-3 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-medium flex items-center gap-2">
+                        <FaTimes className="w-4 h-4" /> 关闭
+                      </button>
+                    </div>
+                  </div>
+                  <SyntaxHighlighter language={'json'} style={vscDarkPlus} wrapLongLines customStyle={{ background: '#1e1e1e', borderRadius: '0.5rem', maxHeight: '70vh' }}>
+                    {JSON.stringify(batchView, null, 2)}
+                  </SyntaxHighlighter>
+                </motion.div>
+              </div>
             )}
         </div>
     );

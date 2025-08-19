@@ -6,6 +6,19 @@ import { existsSync } from 'fs';
 import logger from '../utils/logger';
 import { mongoose } from '../services/mongoService';
 
+// 基础输入清理：限制长度并移除可疑字符
+function sanitizeId(input?: string): string {
+  if (!input || typeof input !== 'string') return '';
+  // 仅保留常见安全字符，限制长度，防止注入与异常索引
+  return input.replace(/[^A-Za-z0-9_\-:@.]/g, '').slice(0, 128);
+}
+
+// 安全构建正则：对模式进行转义
+function escapeRegex(input?: string): string {
+  if (!input || typeof input !== 'string') return '';
+  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // 清洗助手文本中的 <think> 思考内容与可视化标记
 function sanitizeAssistantText(text: string): string {
   if (!text) return text;
@@ -73,7 +86,7 @@ const ChatHistorySchema = new mongoose.Schema({
 // 索引：按用户与更新时间查询
 ChatHistorySchema.index({ userId: 1 });
 ChatHistorySchema.index({ updatedAt: -1 });
-const ChatHistoryModel = mongoose.models.LibreChatHistory || mongoose.model('LibreChatHistory', ChatHistorySchema);
+const ChatHistoryModel: any = mongoose.models.LibreChatHistory || mongoose.model('LibreChatHistory', ChatHistorySchema);
 
 interface ImageRecord {
   updateTime: string;
@@ -214,8 +227,9 @@ class LibreChatService {
   private async upsertTokenHistory(keyId: string, messages: ChatMessage[]) {
     if (mongoose.connection.readyState !== 1) return;
     try {
+      const safeKey = sanitizeId(keyId);
       await (mongoose.models.LibreChatHistory as any).findOneAndUpdate(
-        { userId: keyId },
+        { userId: safeKey },
         { $set: { messages, updatedAt: new Date() } },
         { upsert: true, setDefaultsOnInsert: true }
       );
@@ -321,7 +335,7 @@ class LibreChatService {
     // 读取 OpenAI 兼容配置
     const baseURL = process.env.CHAT_BASE_URL?.replace(/\/$/, '') || '';
     const apiKey = process.env.CHAT_API_KEY || '';
-    const model = 'gpt-oss-120b';
+    const model = process.env.CHAT_MODEL || 'gpt-oss-120b';
 
     // 如果未配置，则返回降级的本地回复（不阻塞）
     if (!baseURL || !apiKey) {
@@ -421,7 +435,7 @@ class LibreChatService {
     let userMessages: ChatMessage[] | null = null;
     if (mongoose.connection.readyState === 1) {
       try {
-        const keyId = userId || token;
+        const keyId = sanitizeId(userId || token);
         const doc = await (mongoose.models.LibreChatHistory as any).findOne({ userId: keyId }).lean();
         if (doc && Array.isArray(doc.messages)) userMessages = doc.messages as ChatMessage[];
       } catch (err) {
@@ -429,7 +443,9 @@ class LibreChatService {
       }
     }
     if (!userMessages) {
-      userMessages = this.chatHistory.filter(msg => userId ? msg.userId === userId : msg.token === token);
+      const safeUserId = sanitizeId(userId);
+      const safeToken = sanitizeId(token);
+      userMessages = this.chatHistory.filter(msg => safeUserId ? msg.userId === safeUserId : msg.token === safeToken);
     }
     const total = userMessages.length;
 
@@ -447,12 +463,14 @@ class LibreChatService {
    * 清除聊天历史
    */
   public async clearHistory(token: string, userId?: string): Promise<void> {
-    this.chatHistory = this.chatHistory.filter(msg => userId ? msg.userId !== userId : msg.token !== token);
+    const safeUserId = sanitizeId(userId);
+    const safeToken = sanitizeId(token);
+    this.chatHistory = this.chatHistory.filter(msg => safeUserId ? msg.userId !== safeUserId : msg.token !== safeToken);
     await this.saveChatHistory();
     // MongoDB 中删除该 token 文档
     if (mongoose.connection.readyState === 1) {
       try {
-        const keyId = userId || token;
+        const keyId = sanitizeId(userId || token);
         await (mongoose.models.LibreChatHistory as any).deleteOne({ userId: keyId });
       } catch (err) {
         logger.error('删除 MongoDB 聊天历史失败:', err);
@@ -465,12 +483,14 @@ class LibreChatService {
    */
   public async deleteMessage(token: string, id: string, userId?: string): Promise<{ removed: number }> {
     const before = this.chatHistory.length;
-    this.chatHistory = this.chatHistory.filter(m => !((userId ? m.userId === userId : m.token === token) && m.id === id));
+    const safeUserId = sanitizeId(userId);
+    const safeToken = sanitizeId(token);
+    this.chatHistory = this.chatHistory.filter(m => !((safeUserId ? m.userId === safeUserId : m.token === safeToken) && m.id === id));
     const removed = before - this.chatHistory.length;
     if (removed > 0) {
       await this.saveChatHistory();
-      const keyId = userId || token;
-      await this.upsertTokenHistory(keyId, this.chatHistory.filter(m => userId ? m.userId === userId : m.token === token));
+      const keyId = sanitizeId(userId || token);
+      await this.upsertTokenHistory(keyId, this.chatHistory.filter(m => safeUserId ? m.userId === safeUserId : m.token === safeToken));
     }
     return { removed };
   }
@@ -514,7 +534,8 @@ class LibreChatService {
   // 仅管理员使用：列出所有用户最新概览（分页）
   public async adminListUsers(keyword = '', page = 1, limit = 20): Promise<{ users: any[]; total: number }> {
     if (mongoose.connection.readyState !== 1) return { users: [], total: 0 };
-    const q: any = keyword ? { userId: { $regex: keyword, $options: 'i' } } : {};
+    const kw = escapeRegex(keyword.trim()).slice(0, 128);
+    const q: any = kw ? { userId: new RegExp(kw, 'i') } : {};
     const total = await (mongoose.models.LibreChatHistory as any).countDocuments(q);
     const docs = await (mongoose.models.LibreChatHistory as any)
       .find(q, { userId: 1, messages: 1, updatedAt: 1 })
@@ -536,7 +557,8 @@ class LibreChatService {
   // 仅管理员使用：获取指定用户的历史（分页）
   public async adminGetUserHistory(userId: string, page = 1, limit = 20): Promise<ChatHistory> {
     if (mongoose.connection.readyState !== 1) return { messages: [], total: 0 };
-    const doc = await (mongoose.models.LibreChatHistory as any).findOne({ userId }).lean();
+    const safeUserId = sanitizeId(userId);
+    const doc = await (mongoose.models.LibreChatHistory as any).findOne({ userId: safeUserId }).lean();
     const all: ChatMessage[] = doc?.messages || [];
     const total = all.length;
     const start = (page - 1) * limit;
@@ -544,15 +566,139 @@ class LibreChatService {
     return { messages: all.slice(start, end), total };
   }
 
-  // 仅管理员使用：删除指定用户全部历史
+  // 仅管理员使用：删除指定用户全部历史（Mongo 不可用时回退到内存存储）
   public async adminDeleteUser(userId: string): Promise<{ deleted: number }> {
-    if (mongoose.connection.readyState !== 1) return { deleted: 0 };
-    const ret = await (mongoose.models.LibreChatHistory as any).deleteOne({ userId });
+    const safeUserId = sanitizeId(userId);
+    let deleted = 0;
+
+    // 优先尝试 MongoDB
+    try {
+      if (mongoose.connection.readyState === 1) {
+        const ret = await (mongoose.models.LibreChatHistory as any).deleteMany({ userId: safeUserId });
+        deleted = (ret?.deletedCount || 0) as number;
+      }
+    } catch (e) {
+      console.warn('[LibreChat] adminDeleteUser mongo delete failed, fallback to memory', e);
+    }
+
     // 同步内存/文件（按 userId 清理）
     const before = this.chatHistory.length;
-    this.chatHistory = this.chatHistory.filter(m => m.userId !== userId);
-    if (this.chatHistory.length !== before) await this.saveChatHistory();
-    return { deleted: (ret?.deletedCount || 0) as number };
+    this.chatHistory = this.chatHistory.filter(m => m.userId !== safeUserId);
+    if (this.chatHistory.length !== before) {
+      await this.saveChatHistory();
+      // 如果 Mongo 未删到文档，则至少按内存处理记作 1
+      if (deleted === 0) deleted = 1;
+    }
+
+    return { deleted };
+  }
+
+  // 仅管理员使用：批量删除多个用户全部历史
+  public async adminBatchDeleteUsers(userIds: string[]): Promise<{ deleted: number; details: { userId: string; deleted: number }[] }> {
+    const safeUserIds = userIds.map(id => sanitizeId(id));
+    const details: { userId: string; deleted: number }[] = [];
+    let totalDeleted = 0;
+
+    // 优先尝试 MongoDB 删除
+    if (mongoose.connection.readyState === 1) {
+      for (const userId of safeUserIds) {
+        try {
+          const ret = await (mongoose.models.LibreChatHistory as any).deleteMany({ userId });
+          const deletedCount = (ret?.deletedCount || 0) as number;
+          details.push({ userId, deleted: deletedCount });
+          totalDeleted += deletedCount;
+        } catch (error) {
+          console.error('删除用户失败', { userId, error });
+          details.push({ userId, deleted: 0 });
+        }
+      }
+    }
+
+    // 同步内存/文件（按 userId 清理）
+    const beforeLen = this.chatHistory.length;
+    this.chatHistory = this.chatHistory.filter(m => m.userId !== undefined && !safeUserIds.includes(m.userId));
+    const afterLen = this.chatHistory.length;
+    if (afterLen !== beforeLen) {
+      await this.saveChatHistory();
+      const memoryDeleted = beforeLen - afterLen;
+      // 如果 Mongo 没有删到，使用内存删除数量兜底
+      if (totalDeleted < memoryDeleted) totalDeleted = memoryDeleted;
+      for (const uid of safeUserIds) {
+        if (!details.find(d => d.userId === uid)) {
+          details.push({ userId: uid, deleted: 1 });
+        }
+      }
+    }
+
+    return { deleted: totalDeleted, details };
+  }
+
+  // 仅管理员使用：删除所有用户历史（危险操作，优先 drop 集合，失败则 deleteMany）
+  public async adminDeleteAllUsers(): Promise<{ deletedCount: number }> {
+    try {
+      const startedAt = Date.now();
+      const mongoConnected = mongoose.connection.readyState === 1;
+      logger.info('开始删除所有用户聊天历史', { mongoConnected });
+
+      let deletedCount = 0;
+      let dbTotalBefore: number | null = null;
+      let dbRemaining: number | null = null;
+
+      if (mongoConnected) {
+        try {
+          dbTotalBefore = await (mongoose.models.LibreChatHistory as any).countDocuments({});
+          logger.info('数据库记录总数（删除前）', { total: dbTotalBefore });
+
+          const result = await (mongoose.models.LibreChatHistory as any).deleteMany({});
+          deletedCount = typeof result?.deletedCount === 'number' ? result.deletedCount : 0;
+
+          dbRemaining = await (mongoose.models.LibreChatHistory as any).countDocuments({});
+          logger.info('数据库删除结果', { deletedCount, remaining: dbRemaining });
+        } catch (dbErr) {
+          logger.error('数据库删除过程中发生错误', dbErr);
+        }
+      } else {
+        logger.warn('MongoDB 未连接，跳过数据库删除');
+      }
+
+      const memoryBefore = this.chatHistory.length;
+      logger.info('内存记录数（删除前）', { memoryBefore });
+      if (memoryBefore > 0) {
+        this.chatHistory = [];
+        await this.saveChatHistory();
+        const memoryAfter = this.chatHistory.length;
+        logger.info('内存与本地缓存已清空', { memoryAfter });
+      } else {
+        logger.info('内存无记录，无需清空');
+      }
+
+      const durationMs = Date.now() - startedAt;
+      logger.info('删除所有用户聊天历史完成', {
+        durationMs,
+        deletedCount,
+        mongoConnected,
+        dbTotalBefore,
+        dbRemaining
+      });
+
+      return { deletedCount };
+    } catch (error) {
+      logger.error('删除所有聊天历史失败:', error);
+      throw error;
+    }
+  }
+
+  public async adminDeleteAllUsersAction(payload: { confirm?: boolean }): Promise<{ statusCode: number; body: any }> {
+    if (!payload?.confirm) {
+      logger.warn('拒绝执行删除所有用户历史：缺少确认标志');
+      return { statusCode: 400, body: { error: '请确认删除所有用户历史' } };
+    }
+    const { deletedCount } = await this.adminDeleteAllUsers();
+    const body = {
+      message: `已删除所有用户历史，共 ${deletedCount} 个用户`,
+      deletedCount
+    };
+    return { statusCode: 200, body };
   }
 
   /**
@@ -562,12 +708,14 @@ class LibreChatService {
     // 优先从 MongoDB 读取
     let userMessages: ChatMessage[] = [];
     if (mongoose.connection.readyState === 1) {
-      const keyId = userId || token;
+      const keyId = sanitizeId(userId || token);
       const doc = await (mongoose.models.LibreChatHistory as any).findOne({ userId: keyId }).lean();
       if (doc && Array.isArray(doc.messages)) userMessages = doc.messages as ChatMessage[];
     }
     if (userMessages.length === 0) {
-      userMessages = this.chatHistory.filter(msg => userId ? msg.userId === userId : msg.token === token);
+      const safeUserId = sanitizeId(userId);
+      const safeToken = sanitizeId(token);
+      userMessages = this.chatHistory.filter(msg => safeUserId ? msg.userId === safeUserId : msg.token === safeToken);
     }
     const count = userMessages.length;
     const now = new Date();
