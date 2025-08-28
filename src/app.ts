@@ -55,6 +55,7 @@ import shortUrlRoutes from './routes/shortUrlRoutes';
 import fbiWantedRoutes from './routes/fbiWantedRoutes';
 import fbiWantedPublicRoutes from './routes/fbiWantedPublicRoutes';
 import humanCheckRoutes from './routes/humanCheckRoutes';
+import debugConsoleRoutes from './routes/debugConsoleRoutes';
 
 import emailRoutes from './routes/emailRoutes';
 import outemailRoutes from './routes/outemailRoutes';
@@ -63,6 +64,8 @@ import webhookRoutes from './routes/webhookRoutes';
 import webhookEventRoutes from './routes/webhookEventRoutes';
 import { authenticateToken } from './middleware/authenticateToken';
 import { totpStatusHandler } from './routes/totpRoutes';
+import turnstileRoutes from './routes/turnstileRoutes';
+import { schedulerService } from './services/schedulerService';
 
 // 扩展 Request 类型
 declare global {
@@ -118,7 +121,7 @@ const allowedOrigins = [
 ];
 
 // 为所有 /s/* 路由添加 OPTIONS 处理器 - 必须在路由挂载之前
-app.options('/s/*', (req: Request, res: Response) => {
+app.options('/s/*path', (req: Request, res: Response) => {
   const origin = req.headers.origin;
   if (origin && allowedOrigins.includes(origin)) {
     res.header('Access-Control-Allow-Origin', origin);
@@ -144,7 +147,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // 为所有 /s/* 路由添加 CORS 响应头中间件 - 必须在路由挂载之前
-app.use('/s/*', (req: Request, res: Response, next: NextFunction) => {
+app.use('/s/*path', (req: Request, res: Response, next: NextFunction) => {
   const origin = req.headers.origin;
   if (origin && allowedOrigins.includes(origin)) {
     res.header('Access-Control-Allow-Origin', origin);
@@ -158,6 +161,37 @@ app.use('/s/*', (req: Request, res: Response, next: NextFunction) => {
 
 // 最高优先级，短链跳转
 app.use('/s', shortUrlRoutes);
+
+// 为 /api/shorturl/* 添加 OPTIONS 处理器 - 必须在路由挂载之前
+app.options('/api/shorturl/*path', (req: Request, res: Response) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else if (!origin) {
+    res.header('Access-Control-Allow-Origin', '*');
+  }
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Access-Control-Request-Method, Access-Control-Request-Headers, Cache-Control');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Max-Age', '86400');
+  res.status(200).end();
+});
+
+// 为所有 /api/shorturl/* 路由添加 CORS 响应头中间件 - 必须在路由挂载之前
+app.use('/api/shorturl/*path', (req: Request, res: Response, next: NextFunction) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else if (!origin) {
+    res.header('Access-Control-Allow-Origin', '*');
+  }
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Expose-Headers', 'Content-Length, X-RateLimit-Limit, X-RateLimit-Remaining, Content-Disposition, Content-Type, Cache-Control');
+  next();
+});
+
+// 为前端管理面板提供 /api 前缀的别名挂载，便于通过代理访问管理接口
+app.use('/api/shorturl', shortUrlRoutes);
 
 // 设置信任代理 - 只信任第一个代理（安全）
 app.set('trust proxy', 1);
@@ -333,9 +367,9 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "blob:", "https:"],
-      scriptSrc: ["'self'"],
+      scriptSrc: ["'self'", "https://challenges.cloudflare.com"],
       connectSrc: ["'self'", "https://api.openai.com", "https://api.hapxs.com", "http://localhost:3000", "http://localhost:3001"],
-      frameSrc: ["'none'"],
+      frameSrc: ["'self'", "https://challenges.cloudflare.com", "https://*.cloudflare.com"],
       objectSrc: ["'none'"],
       upgradeInsecureRequests: []
     }
@@ -795,15 +829,17 @@ app.use('/api/totp', totpRoutes);
 app.use('/api/totp/status', authenticateToken, totpStatusHandler as RequestHandler);
 app.use('/api/admin', adminLimiter, adminRoutes);
 app.use('/api/status', statusRouter);
+app.use('/api/turnstile', turnstileRoutes);
 
-// 添加篡改保护中间件
-app.use(tamperProtectionMiddleware);
-
-// 注册路由
+// 注册篡改路由（无需认证，用于接收篡改报告）
 app.use('/api/tamper', tamperRoutes);
+
+// 添加篡改保护中间件（应用到需要保护的路由）
+app.use(tamperProtectionMiddleware);
 app.use('/api/command', commandRoutes);
 app.use('/api/libre-chat', libreChatRoutes);
 app.use('/api/human-check', humanCheckRoutes);
+app.use('/api/debug-console', debugConsoleRoutes);
 app.use('/api/data-collection', dataCollectionRoutes);
 app.use('/api/data-collection/admin', dataCollectionAdminRoutes);
 app.use('/api/ipfs', ipfsRoutes);
@@ -878,6 +914,11 @@ const rootLimiter = rateLimit({
 // 根路由重定向到前端站点
 app.get('/', rootLimiter, (req, res) => {
   res.redirect('http://tts.hapxs.com/');
+});
+
+// favicon.ico 路由 - 重定向到指定的图片
+app.get('/favicon.ico', (req, res) => {
+  res.redirect(302, 'https://png.hapxs.com/i/2025/08/08/68953253d778d.png');
 });
 
 // 兼容旧路径：直接访问 /lc 与 /librechat-image
@@ -1494,6 +1535,16 @@ if (process.env.NODE_ENV !== 'test') {
 
       // 初始化 UserStorage MongoDB 监听器（所有模式都需要）
       UserStorage.initializeMongoListener();
+
+      // 启动定时任务服务
+      try {
+        schedulerService.start();
+        logger.info('[启动] 定时任务服务已启动');
+      } catch (error) {
+        logger.warn('[启动] 定时任务服务启动失败，继续启动', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
 
       // 移除自动修复Passkey数据
       // logger.info('[启动] 开始自动修复Passkey数据...');

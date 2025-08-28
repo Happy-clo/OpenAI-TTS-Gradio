@@ -36,10 +36,19 @@ RUN npm install -g npm@latest
 RUN echo "🔧 修复 Rollup 依赖问题..." && \
     npm cache clean --force
 
-# 先安装依赖，遇到 rollup 可选依赖问题时强制修复，只安装 musl 版本的 rollup 依赖
+# 先安装依赖，根据平台安装合适的 rollup 依赖
 RUN npm install --no-optional --no-audit --no-fund \
-    && npm install rollup @rollup/rollup-linux-x64-musl --no-optional \
-    || (echo "依赖安装失败，尝试修复..." && rm -rf node_modules package-lock.json && npm install --no-optional --no-audit --no-fund && npm install rollup @rollup/rollup-linux-x64-musl --no-optional)
+    && if [ "$(uname -m)" = "x86_64" ] || [ "$(uname -m)" = "amd64" ]; then \
+    echo "x64 platform detected, installing x64 rollup dependencies..." && \
+    npm install rollup @rollup/rollup-linux-x64-musl --no-optional; \
+    elif [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; then \
+    echo "ARM64 platform detected, skipping platform-specific rollup dependencies..." && \
+    npm install rollup @rollup/rollup-linux-arm64-musl --no-optional; \
+    else \
+    echo "Unknown platform, installing generic rollup..." && \
+    npm install rollup --no-optional; \
+    fi \
+    || (echo "依赖安装失败，尝试修复..." && rm -rf node_modules package-lock.json && npm install --no-optional --no-audit --no-fund && npm install rollup --no-optional)
 
 RUN npm install @fingerprintjs/fingerprintjs --no-optional && \
     npm install crypto-js --no-optional && \
@@ -81,6 +90,10 @@ ENV NPM_CONFIG_FUND=false
 ENV NPM_CONFIG_OPTIONAL=false
 ENV ROLLUP_SKIP_NATIVE_DEPENDENCIES=true
 ENV VITE_SKIP_ROLLUP_NATIVE=true
+# 禁用Git功能，避免在Docker环境中出现Git相关警告
+ENV DISABLE_GIT_INFO=true
+ENV GIT_DISABLED=true
+ENV DOCUSAURUS_DISABLE_GIT_INFO=true
 
 # 安装编译 gifsicle 所需的系统依赖和git
 RUN apk add --no-cache autoconf automake libtool build-base git
@@ -95,7 +108,7 @@ WORKDIR /app/docs
 RUN npm install -g npm@latest
 RUN npm cache clean --force && \
     npm install --no-optional --no-audit --no-fund && \
-    (npm run build:no-git || (echo "第一次构建失败，重试..." && npm run build) || (echo "第二次构建失败，使用简化构建..." && npm run build:simple))
+    (npm run build:no-git || (echo "第一次构建失败，重试..." && npm run build:docker) || (echo "第二次构建失败，使用简化构建..." && npm run build:simple))
 
 # 构建后端
 FROM node:22-alpine AS backend-builder
@@ -168,6 +181,12 @@ COPY --from=backend-builder /app/openapi.json ./openapi.json
 COPY --from=backend-builder /app/openapi.json ./dist/openapi.json
 COPY --from=frontend-builder /app/frontend/dist ./public
 COPY --from=docs-builder /app/docs/build ./docs
+
+# 创建运行用户 nodejs 并修正权限，避免找不到用户错误
+RUN addgroup -S nodejs && adduser -S nodejs -G nodejs && \
+    chown -R nodejs:nodejs /app
+
+USER nodejs
 
 # 暴露端口
 EXPOSE 3000 3001 3002

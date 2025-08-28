@@ -75,7 +75,8 @@ class IntegrityChecker {
     'ShortLinkManager', 'CDKStoreManager',
     'ApiDocs', 'EmailSender',
     'ImageUploadPage', 'ImageUploadSection',
-    'FBIWantedManager', 'FBIWantedPublic'
+    'FBIWantedManager', 'FBIWantedPublic',
+    'FirstVisitVerification'
   ];
 
   private constructor() {
@@ -124,14 +125,16 @@ class IntegrityChecker {
         '/upload', '/image', '/images', '/img',
         '/fbi', '/wanted', '/public', '/docs', '/api-docs',
         '/resource', '/resources', '/short', '/shortlink', '/short-links',
-        '/cdk', '/cdk-store'
+        '/cdk', '/cdk-store', '/librechat',
+        '/verification', '/verify', '/first-visit', '/captcha', '/turnstile'
       ];
       if (exemptPathKeywords.some(k => pathname.toLowerCase().includes(k))) return true;
 
       // 标题豁免
       const exemptTitleKeywords = [
         'upload', 'image', 'markdown', 'api', 'docs', 'documentation',
-        'fbi', 'wanted', 'shortlink', 'short link', 'cdk', 'store'
+        'fbi', 'wanted', 'shortlink', 'short link', 'cdk', 'store', 'librechat',
+        'verification', 'verify', 'first visit', 'captcha', 'turnstile', 'security'
       ];
       if (exemptTitleKeywords.some(k => title.includes(k))) return true;
 
@@ -146,6 +149,24 @@ class IntegrityChecker {
           `[class*="${marker}"]`
         ];
         if (document.querySelector(sel.join(', '))) return true;
+      }
+
+      // 特殊处理 LibreChat 页面
+      if (document.querySelector('[data-component="LibreChatPage"]') || 
+          document.querySelector('[data-page="librechat"]') ||
+          pathname.includes('/librechat')) {
+        return true;
+      }
+
+      // 特殊处理首次访问验证页面
+      if (document.querySelector('[data-component="FirstVisitVerification"]') || 
+          document.querySelector('[data-page="FirstVisitVerification"]') ||
+          document.querySelector('[data-view="FirstVisitVerification"]') ||
+          pathname.includes('/verification') ||
+          pathname.includes('/verify') ||
+          title.includes('verification') ||
+          title.includes('verify')) {
+        return true;
       }
 
       // 可信来源的整页资源（如受信任CDN/域名提供的页面片段）
@@ -828,6 +849,14 @@ class IntegrityChecker {
             return;
           }
 
+          // 如果在豁免页面，跳过检查
+          if (this.isExemptPage()) {
+            if (this.debugMode) {
+              this.safeLog('log', '✅ 在豁免页面，跳过完整性检查');
+            }
+            return;
+          }
+
           if (mutation.type === 'characterData' || mutation.type === 'childList') {
             this.handleMutation(mutation);
           }
@@ -847,6 +876,11 @@ class IntegrityChecker {
   }
 
   private handleMutation(mutation: MutationRecord): void {
+    // 如果在豁免页面，跳过检查
+    if (this.isExemptPage()) {
+      return;
+    }
+
     if (mutation.type === 'characterData' && mutation.target.textContent) {
       const text = mutation.target.textContent;
       this.checkProtectedTexts(text, mutation.target as Node);
@@ -862,6 +896,11 @@ class IntegrityChecker {
   private checkProtectedTexts(text: string, node: Node): void {
     // 检查是否是安全的文本变化
     if (this.isSafeTextChange(text, node)) {
+      return;
+    }
+
+    // 如果在 LibreChat 页面，放宽检查
+    if (this.isExemptPage()) {
       return;
     }
 
@@ -883,8 +922,9 @@ class IntegrityChecker {
     // 检查父元素是否是安全元素
     let parent = node.parentElement;
     while (parent) {
-      const className = parent.className || '';
-      const id = parent.id || '';
+      // 安全地获取 className 和 id，确保它们是字符串类型
+      const className = typeof parent.className === 'string' ? parent.className : '';
+      const id = typeof parent.id === 'string' ? parent.id : '';
       
       // 安全元素标识
       const safeIdentifiers = [
@@ -892,9 +932,22 @@ class IntegrityChecker {
         'modal', 'popup', 'tooltip', 'dropdown', 'menu'
       ];
       
-      if (safeIdentifiers.some(id => 
-        className.toLowerCase().includes(id) || 
-        id.toLowerCase().includes(id)
+      if (safeIdentifiers.some(safeId => 
+        className.toLowerCase().includes(safeId) || 
+        id.toLowerCase().includes(safeId)
+      )) {
+        return true;
+      }
+      
+      // 检查是否是聊天相关的元素
+      const chatIdentifiers = [
+        'chat', 'message', 'conversation', 'dialog', 'librechat',
+        'user', 'assistant', 'bot', 'ai', 'streaming'
+      ];
+      
+      if (chatIdentifiers.some(chatId => 
+        className.toLowerCase().includes(chatId) || 
+        id.toLowerCase().includes(chatId)
       )) {
         return true;
       }
@@ -916,7 +969,45 @@ class IntegrityChecker {
       /menu/gi
     ];
 
-    return safeTextPatterns.some(pattern => pattern.test(text));
+    // 检查是否是聊天相关的文本内容
+    const chatTextPatterns = [
+      /用户/gi,
+      /助手/gi,
+      /assistant/gi,
+      /user/gi,
+      /生成中/gi,
+      /发送中/gi,
+      /loading/gi,
+      /streaming/gi,
+      /聊天/gi,
+      /对话/gi,
+      /消息/gi
+    ];
+
+    // 检查是否是验证相关的文本内容
+    const verificationTextPatterns = [
+      /验证/gi,
+      /verification/gi,
+      /verify/gi,
+      /captcha/gi,
+      /turnstile/gi,
+      /人机验证/gi,
+      /安全验证/gi,
+      /首次访问/gi,
+      /first visit/gi,
+      /欢迎访问/gi,
+      /welcome/gi,
+      /继续访问/gi,
+      /验证通过/gi,
+      /验证成功/gi,
+      /验证失败/gi,
+      /重试/gi,
+      /retry/gi
+    ];
+
+    return safeTextPatterns.some(pattern => pattern.test(text)) ||
+           chatTextPatterns.some(pattern => pattern.test(text)) ||
+           verificationTextPatterns.some(pattern => pattern.test(text));
   }
 
   private handleTextTampering(node: Node, tamperText: string, originalText: string): void {
@@ -1442,6 +1533,96 @@ class IntegrityChecker {
         }
       }
     });
+  }
+
+  // 检查当前页面是否被豁免（调试用）
+  public checkExemptStatus(): {
+    isExempt: boolean;
+    isTrustedUrl: boolean;
+    exemptReasons: string[];
+  } {
+    const exemptReasons: string[] = [];
+    let isExempt = false;
+    let isTrustedUrl = false;
+
+    try {
+      const href = window.location.href;
+      const pathname = window.location.pathname || '';
+      const title = (document.title || '').toLowerCase();
+
+      // 检查可信URL
+      isTrustedUrl = this.isTrustedUrl(href);
+      if (isTrustedUrl) {
+        exemptReasons.push('可信URL');
+        isExempt = true;
+      }
+
+      // 检查路径豁免
+      const exemptPathKeywords = [
+        '/upload', '/image', '/images', '/img',
+        '/fbi', '/wanted', '/public', '/docs', '/api-docs',
+        '/resource', '/resources', '/short', '/shortlink', '/short-links',
+        '/cdk', '/cdk-store', '/librechat',
+        '/verification', '/verify', '/first-visit', '/captcha', '/turnstile'
+      ];
+      
+      const matchedPaths = exemptPathKeywords.filter(k => pathname.toLowerCase().includes(k));
+      if (matchedPaths.length > 0) {
+        exemptReasons.push(`路径豁免: ${matchedPaths.join(', ')}`);
+        isExempt = true;
+      }
+
+      // 检查标题豁免
+      const exemptTitleKeywords = [
+        'upload', 'image', 'markdown', 'api', 'docs', 'documentation',
+        'fbi', 'wanted', 'shortlink', 'short link', 'cdk', 'store', 'librechat',
+        'verification', 'verify', 'first visit', 'captcha', 'turnstile', 'security'
+      ];
+      
+      const matchedTitles = exemptTitleKeywords.filter(k => title.includes(k));
+      if (matchedTitles.length > 0) {
+        exemptReasons.push(`标题豁免: ${matchedTitles.join(', ')}`);
+        isExempt = true;
+      }
+
+      // 检查组件标记豁免
+      const foundMarkers: string[] = [];
+      for (const marker of this.COMPONENT_EXEMPT_MARKERS) {
+        const selectors = [
+          `[data-component="${marker}"]`,
+          `[data-page="${marker}"]`,
+          `[data-view="${marker}"]`,
+          `#${CSS.escape(marker)}`,
+          `[id*="${marker}"]`,
+          `[class*="${marker}"]`
+        ];
+        
+        for (const selector of selectors) {
+          if (document.querySelector(selector)) {
+            foundMarkers.push(`${marker} (${selector})`);
+            break;
+          }
+        }
+      }
+      
+      if (foundMarkers.length > 0) {
+        exemptReasons.push(`组件标记豁免: ${foundMarkers.join(', ')}`);
+        isExempt = true;
+      }
+
+      return {
+        isExempt,
+        isTrustedUrl,
+        exemptReasons
+      };
+    } catch (error) {
+      this.safeLog('error', '❌ 检查豁免状态时出错:', error);
+      return {
+        isExempt: false,
+        isTrustedUrl: false,
+        exemptReasons: ['检查失败']
+      };
+    }
   }
 }
 

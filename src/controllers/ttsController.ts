@@ -6,8 +6,27 @@ import logger from '../utils/logger';
 import { config } from '../config/config';
 import axios from 'axios';
 import { ContentFilterService } from '../services/contentFilterService';
-import { CloudflareTurnstileService } from '../services/cloudflareTurnstileService';
+import { TurnstileService } from '../services/turnstileService';
+
 import { findDuplicateGeneration, addGenerationRecord, isAdminUser } from '../services/userGenerationService';
+import { mongoose } from '../services/mongoService';
+
+// 使用 MongoDB 存储与读取 TTS 生成码，不再读取配置文件中的 generationCode
+const TtsSettingSchema = new mongoose.Schema({
+    key: { type: String, default: 'GENERATION_CODE' },
+    code: { type: String, required: true },
+    updatedAt: { type: Date, default: Date.now }
+}, { collection: 'tts_settings' });
+const TtsSettingModel = mongoose.models.TtsSetting || mongoose.model('TtsSetting', TtsSettingSchema);
+
+async function getTtsGenerationCodeFromDb(): Promise<string | null> {
+    try {
+        const doc = await TtsSettingModel.findOne({ key: 'GENERATION_CODE' }).lean().exec() as { code?: string } | null;
+        return (doc && typeof doc.code === 'string' && doc.code.length > 0) ? doc.code : null;
+    } catch {
+        return null;
+    }
+}
 
 export class TtsController {
     private static ttsService = new TtsService();
@@ -83,29 +102,32 @@ export class TtsController {
                 }
             }
 
-            // 检查生成码
-            if (!generationCode || generationCode !== config.generationCode) {
+            // 检查生成码（改为从MongoDB读取）
+            const expectedCode = await getTtsGenerationCodeFromDb();
+            if (!generationCode || !expectedCode || generationCode !== expectedCode) {
                 logger.warn('生成码验证失败', {
                     ip,
                     userAgent: req.headers['user-agent'],
                     providedCode: generationCode,
-                    expectedCode: config.generationCode,
+                    expectedCode,
                     timestamp: new Date().toISOString()
                 });
                 return res.status(403).json({
                     error: '生成码无效',
                     details: {
                         provided: generationCode,
-                        expected: config.generationCode
+                        expected: expectedCode
                     }
                 });
             }
 
-            // 验证 Cloudflare Turnstile
-            if (CloudflareTurnstileService.isEnabled()) {
-                const cfVerified = await CloudflareTurnstileService.verifyToken(cfToken, ip);
+
+
+            // 验证 Turnstile
+            if (await TurnstileService.isEnabled()) {
+                const cfVerified = await TurnstileService.verifyToken(cfToken, ip);
                 if (!cfVerified) {
-                    logger.warn('Cloudflare Turnstile 验证失败', {
+                    logger.warn('Turnstile 验证失败', {
                         ip,
                         userAgent: req.headers['user-agent'],
                         timestamp: new Date().toISOString()

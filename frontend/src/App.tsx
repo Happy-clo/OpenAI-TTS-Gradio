@@ -1,5 +1,5 @@
 import React, { useState, useEffect, Suspense, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { LazyMotion, domAnimation, m, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { useAuth } from './hooks/useAuth';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, Link } from 'react-router-dom';
 import { TOTPStatus } from './types/auth';
@@ -14,6 +14,9 @@ import md5 from 'md5';
 import getApiBaseUrl from './api';
 import DOMPurify from 'dompurify';
 import { reportFingerprintOnce } from './utils/fingerprint';
+import { useFirstVisitDetection } from './hooks/useFirstVisitDetection';
+import { FirstVisitVerification } from './components/FirstVisitVerification';
+import clarity from '@microsoft/clarity';
 
 // 懒加载组件
 const WelcomePage = React.lazy(() => import('./components/WelcomePage').then(module => ({ default: module.WelcomePage })));
@@ -101,54 +104,98 @@ const pageVariants = {
   }
 };
 
-// 背景粒子组件
-const BackgroundParticles: React.FC = () => {
-  const [particles, setParticles] = React.useState<Array<{ id: number, x: number, y: number, duration: number }>>([]);
+// 统一过渡常量，结合 useReducedMotion 可降级
+const PAGE_TRANSITION = { type: 'tween', ease: 'easeInOut', duration: 0.4 } as const;
+const NAV_SPRING = { type: 'spring', stiffness: 100, damping: 20 } as const;
+const TOTP_SPRING = { type: 'spring', stiffness: 300, damping: 30 } as const;
 
+// 背景粒子组件
+const BackgroundParticles: React.FC = React.memo(() => {
+  const [isDocVisible, setIsDocVisible] = React.useState(
+    typeof document !== 'undefined' ? document.visibilityState === 'visible' : true
+  );
+
+  // 生成粒子（只计算一次）
+  const particles = React.useMemo(() => {
+    const w = typeof window !== 'undefined' ? window.innerWidth : 1200;
+    const h = typeof window !== 'undefined' ? window.innerHeight : 800;
+
+    // 根据屏幕尺寸自适应数量，尽量减小 DOM 数量
+    const isMobile = w < 768;
+    const count = isMobile ? 8 : 14; // 原为 20
+
+    return Array.from({ length: count }, (_, i) => {
+      const x0 = Math.random() * w;
+      const y0 = Math.random() * h;
+      const x1 = Math.random() * w;
+      const y1 = Math.random() * h;
+      return {
+        id: i,
+        x: x0,
+        y: y0,
+        dx: x1 - x0,
+        dy: y1 - y0,
+        duration: Math.random() * 16 + 12 // 原为 [10,30]，略微收敛以降低刷新感知
+      };
+    });
+  }, []);
+
+  // 页面可见性变化时暂停/恢复动画（降低后台标签页的资源占用）
   React.useEffect(() => {
-    // 预生成粒子位置，避免每次渲染都重新计算
-    const generatedParticles = Array.from({ length: 20 }, (_, i) => ({
-      id: i,
-      x: Math.random() * (typeof window !== 'undefined' ? window.innerWidth : 1200),
-      y: Math.random() * (typeof window !== 'undefined' ? window.innerHeight : 800),
-      duration: Math.random() * 20 + 10
-    }));
-    setParticles(generatedParticles);
+    const onVisible = () => setIsDocVisible(document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
   return (
     <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
-      {particles.map((particle) => (
-        <motion.div
-          key={particle.id}
-          className="absolute w-2 h-2 bg-indigo-200 rounded-full opacity-30"
-          initial={{
-            x: particle.x,
-            y: particle.y,
-          }}
-          animate={{
-            x: Math.random() * (typeof window !== 'undefined' ? window.innerWidth : 1200),
-            y: Math.random() * (typeof window !== 'undefined' ? window.innerHeight : 800),
-          }}
-          transition={{
-            duration: particle.duration,
-            repeat: Infinity,
-            ease: "linear"
+      {/* 全局 keyframes（CSS 动画，避免 JS 每帧计算，降低开销） */}
+      <style>
+        {`
+          @keyframes particleMove {
+            0% { transform: translate(0, 0); opacity: 0.25; }
+            50% { opacity: 0.35; }
+            100% { transform: translate(var(--dx), var(--dy)); opacity: 0.25; }
+          }
+        `}
+      </style>
+      {particles.map((p) => (
+        <div
+          key={p.id}
+          className="absolute w-2 h-2 bg-indigo-200 rounded-full"
+          style={{
+            left: `${p.x}px`,
+            top: `${p.y}px`,
+            // 使用 CSS 变量传递偏移量，配合统一的 keyframes
+            // 避免为每个粒子生成独立的 keyframes
+            ['--dx' as any]: `${p.dx}px`,
+            ['--dy' as any]: `${p.dy}px`,
+            animation: `particleMove ${p.duration}s linear infinite`,
+            animationPlayState: isDocVisible ? 'running' : 'paused',
+            willChange: 'transform, opacity',
+            opacity: 0.3
           }}
         />
       ))}
     </div>
   );
-};
+});
 
 // 水印组件（满屏铺满）
-const WatermarkOverlay: React.FC = () => {
-  const [watermarks, setWatermarks] = React.useState<Array<{ id: number, left: string, top: string, rotate: number }>>([]);
+const WatermarkOverlay: React.FC = React.memo(() => {
+  const [isDocVisible, setIsDocVisible] = React.useState(
+    typeof document !== 'undefined' ? document.visibilityState === 'visible' : true
+  );
+  const prefersReduced = useReducedMotion();
 
-  React.useEffect(() => {
-    // 极高密度，降低页面可读性
-    const cols = 20;
-    const rows = 14;
+  // 生成水印网格（只在初次渲染计算一次，避免在窗口缩放时大规模重排）
+  const watermarks = React.useMemo(() => {
+    const w = typeof window !== 'undefined' ? window.innerWidth : 1200;
+    // 根据屏幕大小控制密度，减少 DOM 数量
+    const isMobile = w < 768;
+    const cols = isMobile ? 10 : 16; // 原为 20
+    const rows = isMobile ? 7 : 10;  // 原为 14
+
     const items: Array<{ id: number, left: string, top: string, rotate: number }> = [];
     let id = 0;
     for (let r = 0; r < rows; r++) {
@@ -161,8 +208,17 @@ const WatermarkOverlay: React.FC = () => {
         });
       }
     }
-    setWatermarks(items);
+    return items;
   }, []);
+
+  // 页面可见性变化时暂停/恢复动画
+  React.useEffect(() => {
+    const onVisible = () => setIsDocVisible(document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
+  const playState = isDocVisible && !prefersReduced ? 'running' : 'paused';
 
   return (
     <div className="fixed inset-0 z-[99999] pointer-events-none overflow-hidden backdrop-blur-sm">
@@ -173,7 +229,8 @@ const WatermarkOverlay: React.FC = () => {
           backgroundImage:
             'repeating-linear-gradient(45deg, rgba(255,0,0,0.18) 0px, rgba(255,0,0,0.18) 10px, transparent 10px, transparent 22px)',
           backgroundSize: '200px 200px',
-          animation: 'wmScroll 12s linear infinite',
+          animation: prefersReduced ? 'none' : 'wmScroll 12s linear infinite',
+          animationPlayState: playState as any,
           mixBlendMode: 'multiply',
         }}
       />
@@ -183,7 +240,8 @@ const WatermarkOverlay: React.FC = () => {
         style={{
           backgroundImage:
             'repeating-linear-gradient(0deg, rgba(0,0,0,0.08) 0px, rgba(0,0,0,0.08) 1px, transparent 1px, transparent 6px)',
-          animation: 'wmScrollY 14s linear infinite',
+          animation: prefersReduced ? 'none' : 'wmScrollY 14s linear infinite',
+          animationPlayState: playState as any,
           mixBlendMode: 'multiply',
         }}
       />
@@ -195,9 +253,10 @@ const WatermarkOverlay: React.FC = () => {
             left: wm.left,
             top: wm.top,
             transform: `translate(-50%, -50%) rotate(${wm.rotate}deg)`,
-            fontSize: '16px',
-            animation: 'wmJitter 3s ease-in-out infinite alternate',
+            fontSize: (typeof window !== 'undefined' && window.innerWidth < 768) ? '14px' : '16px',
+            animation: prefersReduced ? 'none' : 'wmJitter 3s ease-in-out infinite alternate',
             animationDelay: `${(wm.id % 7) * 0.15}s`,
+            animationPlayState: playState as any,
           }}
         >
           Copyright Individual Developer Happy-clo
@@ -221,7 +280,7 @@ const WatermarkOverlay: React.FC = () => {
       </style>
     </div>
   );
-};
+});
 
 const App: React.FC = () => {
   const { user, loading, logout } = useAuth();
@@ -230,10 +289,30 @@ const App: React.FC = () => {
   const [showTOTPManager, setShowTOTPManager] = useState(false);
   const [totpStatus, setTotpStatus] = useState<TOTPStatus | null>(null);
   const [showWatermark, setShowWatermark] = useState(false);
+  const prefersReducedMotion = useReducedMotion();
+
+  // 首次访问检测
+  const {
+    isFirstVisit,
+    isVerified,
+    isLoading: isFirstVisitLoading,
+    error: firstVisitError,
+    fingerprint,
+    isIpBanned,
+    banReason,
+    banExpiresAt,
+    clientIP,
+    markAsVerified,
+  } = useFirstVisitDetection();
 
   // 在App组件内，提升isMobile/isOverflow状态
   const [isMobileNav, setIsMobileNav] = useState(false);
   const navRef = useRef<HTMLDivElement>(null);
+  const pageTransition = React.useMemo(() => (prefersReducedMotion ? { duration: 0 } : PAGE_TRANSITION), [prefersReducedMotion]);
+  const navTransition = React.useMemo(() => (prefersReducedMotion ? { duration: 0 } : NAV_SPRING), [prefersReducedMotion]);
+  const overlayTransition = React.useMemo(() => (prefersReducedMotion ? { duration: 0 } : { duration: 0.5 }), [prefersReducedMotion]);
+  const showParticles = !prefersReducedMotion;
+
   useEffect(() => {
     const checkMobileOrOverflow = () => {
       const isMobileScreen = window.innerWidth < 768;
@@ -300,6 +379,116 @@ const App: React.FC = () => {
       window.removeEventListener('show-happy-tts-watermark', handleShowWatermark);
     };
   }, []);
+
+  // 空闲时间预取高频组件，提升首次交互体验
+  useEffect(() => {
+    const win: any = typeof window !== 'undefined' ? window : undefined;
+    const schedule = win && win.requestIdleCallback ? win.requestIdleCallback : (cb: () => void) => setTimeout(cb, 300);
+    const cancel = win && win.cancelIdleCallback ? win.cancelIdleCallback : (id: any) => clearTimeout(id);
+    const id = schedule(() => {
+      import('./components/TtsPage');
+      import('./components/MobileNav');
+      import('./components/Footer');
+      import('./components/WelcomePage');
+    });
+    return () => cancel(id);
+  }, []);
+
+  // Microsoft Clarity 初始化状态
+  const [clarityInitialized, setClarityInitialized] = useState(false);
+
+  // Microsoft Clarity 初始化
+  useEffect(() => {
+    const initializeClarity = async () => {
+      if (typeof window === 'undefined') return;
+
+      try {
+        // 从后端获取 Clarity 配置
+        const response = await fetch('/api/tts/clarity/config', {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+          },
+          credentials: 'same-origin'
+        });
+
+        if (response.ok) {
+          const config = await response.json();
+          
+          if (config.enabled && config.projectId) {
+            clarity.init(config.projectId);
+            setClarityInitialized(true);
+            console.log('Microsoft Clarity initialized successfully with project ID:', config.projectId);
+          } else {
+            console.log('Microsoft Clarity is disabled or project ID not configured');
+          }
+        } else {
+          console.warn('Failed to fetch Clarity config from server');
+        }
+      } catch (error) {
+        console.warn('Failed to initialize Microsoft Clarity:', error);
+      }
+    };
+
+    initializeClarity();
+  }, []);
+
+  // 用户状态变化时更新 Clarity 用户标识
+  useEffect(() => {
+    if (typeof window === 'undefined' || !clarityInitialized) return;
+
+    try {
+      if (user) {
+        // 用户登录时设置用户标识
+        clarity.identify(
+          user.id || user.username || 'unknown-user',
+          undefined, // customSessionId
+          undefined, // customPageId  
+          user.username || user.email || 'Unknown User' // friendlyName
+        );
+
+        // 设置用户相关标签
+        clarity.setTag('user_role', user.role || 'user');
+        clarity.setTag('user_status', 'logged_in');
+        if (user.email) {
+          clarity.setTag('user_domain', user.email.split('@')[1] || 'unknown');
+        }
+      } else {
+        // 用户未登录时设置匿名标识
+        clarity.identify('anonymous-user');
+        clarity.setTag('user_status', 'anonymous');
+      }
+    } catch (error) {
+      console.warn('Failed to update Clarity user identification:', error);
+    }
+  }, [user, clarityInitialized]);
+
+  // 路由变化时设置页面标签
+  useEffect(() => {
+    if (typeof window === 'undefined' || !clarityInitialized) return;
+
+    try {
+      const routePath = location.pathname;
+      const routeName = routePath === '/' ? 'home' : routePath.replace(/^\//, '').replace(/\//g, '_');
+
+      clarity.setTag('current_route', routeName);
+      clarity.setTag('route_path', routePath);
+
+      // 为特定路由设置额外标签
+      if (routePath.startsWith('/admin')) {
+        clarity.setTag('page_type', 'admin');
+      } else if (routePath === '/welcome') {
+        clarity.setTag('page_type', 'auth');
+      } else if (routePath === '/') {
+        clarity.setTag('page_type', 'main_app');
+      } else {
+        clarity.setTag('page_type', 'feature');
+      }
+    } catch (error) {
+      console.warn('Failed to set Clarity route tags:', error);
+    }
+  }, [location.pathname, clarityInitialized]);
 
   useEffect(() => {
     const fetchTOTPStatus = async () => {
@@ -501,503 +690,534 @@ const App: React.FC = () => {
 
   // 统一的渲染逻辑，不再区分管理员和普通用户
 
+  // 首次访问验证
+  if (isFirstVisitLoading) {
+    return (
+      <NotificationProvider>
+        <LazyMotion features={domAnimation}>
+          <LoadingSpinner />
+        </LazyMotion>
+      </NotificationProvider>
+    );
+  }
+
+  // 首次访问且未验证，显示验证页面
+  if (isFirstVisit && !isVerified && fingerprint) {
+    return (
+      <NotificationProvider>
+        <LazyMotion features={domAnimation}>
+          <FirstVisitVerification
+            fingerprint={fingerprint}
+            onVerificationComplete={markAsVerified}
+            isIpBanned={isIpBanned}
+            banReason={banReason}
+            banExpiresAt={banExpiresAt}
+            clientIP={clientIP}
+          />
+        </LazyMotion>
+      </NotificationProvider>
+    );
+  }
+
   return (
     <NotificationProvider>
-      <ToastContainer position="top-center" autoClose={2000} hideProgressBar newestOnTop />
-      {/* 公告弹窗 */}
-      <AnnouncementModal
-        open={showAnnouncement && !!announcement}
-        onClose={handleCloseAnnouncement}
-        onCloseToday={handleCloseToday}
-        onCloseForever={handleCloseForever}
-        content={announcement?.content ? DOMPurify.sanitize(announcement.content) : ''}
-        format={announcement?.format || 'markdown'}
-        // 新增：内容区自适应高度，超出可滚动
-        contentClassName="max-h-[60vh] sm:max-h-[50vh] overflow-y-auto px-2 sm:px-4"
-      />
-      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 relative overflow-hidden">
-        <BackgroundParticles />
-        <motion.nav
-          initial={{ y: -100, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ type: "spring", stiffness: 100, damping: 20 }}
-          className="bg-white/80 backdrop-blur-lg shadow-lg relative z-10"
-        >
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex justify-between items-center h-16">
-              <motion.div
-                className="flex items-center space-x-2"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                transition={{ type: "spring", stiffness: 400, damping: 10 }}
-              >
-                <motion.svg
-                  className="w-8 h-8 text-indigo-600"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                  animate={{ rotate: [0, 10, -10, 0] }}
-                  transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+      <LazyMotion features={domAnimation}>
+        <ToastContainer position="top-center" autoClose={2000} hideProgressBar newestOnTop />
+        {/* 公告弹窗 */}
+        <AnnouncementModal
+          open={showAnnouncement && !!announcement}
+          onClose={handleCloseAnnouncement}
+          onCloseToday={handleCloseToday}
+          onCloseForever={handleCloseForever}
+          content={announcement?.content ? DOMPurify.sanitize(announcement.content) : ''}
+          format={announcement?.format || 'markdown'}
+          // 新增：内容区自适应高度，超出可滚动
+          contentClassName="max-h-[60vh] sm:max-h-[50vh] overflow-y-auto px-2 sm:px-4"
+        />
+        <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 relative overflow-hidden">
+          {showParticles && <BackgroundParticles />}
+          <m.nav
+            initial={{ y: -100, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            transition={navTransition}
+            className="bg-white/80 backdrop-blur-lg shadow-lg relative z-10"
+          >
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+              <div className="flex justify-between items-center h-16">
+                <m.div
+                  className="flex items-center space-x-2"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  transition={{ type: "spring", stiffness: 400, damping: 10 }}
                 >
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                </motion.svg>
-                <Link to="/" className="text-xl font-bold text-gray-900 hover:text-indigo-600 transition-colors">Happy TTS</Link>
-              </motion.div>
+                  <m.svg
+                    className="w-8 h-8 text-indigo-600"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    animate={{ rotate: [0, 10, -10, 0] }}
+                    transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                  </m.svg>
+                  <Link to="/" className="text-xl font-bold text-gray-900 hover:text-indigo-600 transition-colors">Happy TTS</Link>
+                </m.div>
 
-              {/* 导航栏自适应切换 - 只在用户登录时显示 */}
-              {user && (
-                <div ref={navRef} className="flex-1 flex justify-end">
-                  <Suspense fallback={<div className="w-8 h-8 bg-gray-200 rounded animate-pulse"></div>}>
-                    <MobileNav
-                      user={user}
-                      logout={logout}
-                      onTOTPManagerOpen={() => setShowTOTPManager(true)}
-                      totpStatus={totpStatus}
-                    />
-                  </Suspense>
-                </div>
-              )}
+                {/* 导航栏自适应切换 - 只在用户登录时显示 */}
+                {user && (
+                  <div ref={navRef} className="flex-1 flex justify-end">
+                    <Suspense fallback={<div className="w-8 h-8 bg-gray-200 rounded animate-pulse"></div>}>
+                      <MobileNav
+                        user={user}
+                        logout={logout}
+                        onTOTPManagerOpen={() => setShowTOTPManager(true)}
+                        totpStatus={totpStatus}
+                      />
+                    </Suspense>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        </motion.nav>
+          </m.nav>
 
-        <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8 relative z-10">
-          <AnimatePresence mode="wait">
-            <Routes location={location} key={location.pathname}>
-              <Route path="/api-docs" element={
-                <motion.div
-                  variants={pageVariants}
-                  initial="initial"
-                  animate="in"
-                  exit="out"
-                  transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                >
-                  <ApiDocs />
-                </motion.div>
-              } />
-              <Route path="/policy" element={
-                <motion.div
-                  variants={pageVariants}
-                  initial="initial"
-                  animate="in"
-                  exit="out"
-                  transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                >
-                  <PolicyPage />
-                </motion.div>
-              } />
-              <Route path="/fbi-wanted" element={
-                <Suspense fallback={<LoadingSpinner />}>
-                  <motion.div
+          <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8 relative z-10">
+            <AnimatePresence mode="wait">
+              <Routes location={location} key={location.pathname}>
+                <Route path="/api-docs" element={
+                  <m.div
                     variants={pageVariants}
                     initial="initial"
                     animate="in"
                     exit="out"
-                    transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
+                    transition={pageTransition}
                   >
-                    <FBIWantedPublic />
-                  </motion.div>
-                </Suspense>
-              } />
-              <Route
-                path="/welcome"
-                element={
-                  user ? (
-                    <Navigate to="/" replace />
-                  ) : (
-                    <motion.div
+                    <ApiDocs />
+                  </m.div>
+                } />
+                <Route path="/policy" element={
+                  <m.div
+                    variants={pageVariants}
+                    initial="initial"
+                    animate="in"
+                    exit="out"
+                    transition={pageTransition}
+                  >
+                    <PolicyPage />
+                  </m.div>
+                } />
+                <Route path="/fbi-wanted" element={
+                  <Suspense fallback={<LoadingSpinner />}>
+                    <m.div
                       variants={pageVariants}
                       initial="initial"
                       animate="in"
                       exit="out"
-                      transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
+                      transition={pageTransition}
                     >
-                      <WelcomePage />
-                    </motion.div>
-                  )
-                }
-              />
-              <Route
-                path="/"
-                element={
+                      <FBIWantedPublic />
+                    </m.div>
+                  </Suspense>
+                } />
+                <Route
+                  path="/welcome"
+                  element={
+                    user ? (
+                      <Navigate to="/" replace />
+                    ) : (
+                      <m.div
+                        variants={pageVariants}
+                        initial="initial"
+                        animate="in"
+                        exit="out"
+                        transition={pageTransition}
+                      >
+                        <WelcomePage />
+                      </m.div>
+                    )
+                  }
+                />
+                <Route
+                  path="/"
+                  element={
+                    user ? (
+                      <m.div
+                        variants={pageVariants}
+                        initial="initial"
+                        animate="in"
+                        exit="out"
+                        transition={pageTransition}
+                      >
+                        <TtsPage />
+                      </m.div>
+                    ) : (
+                      <Navigate to="/welcome" replace state={{ from: location.pathname }} />
+                    )
+                  }
+                />
+                <Route path="/lottery" element={
                   user ? (
-                    <motion.div
-                      variants={pageVariants}
-                      initial="initial"
-                      animate="in"
-                      exit="out"
-                      transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                    >
-                      <TtsPage />
-                    </motion.div>
+                    <Suspense fallback={<LoadingSpinner />}>
+                      <m.div
+                        variants={pageVariants}
+                        initial="initial"
+                        animate="in"
+                        exit="out"
+                        transition={pageTransition}
+                      >
+                        <LotteryPage />
+                      </m.div>
+                    </Suspense>
                   ) : (
                     <Navigate to="/welcome" replace state={{ from: location.pathname }} />
                   )
-                }
-              />
-              <Route path="/lottery" element={
-                user ? (
-                  <Suspense fallback={<LoadingSpinner />}>
-                    <motion.div
-                      variants={pageVariants}
-                      initial="initial"
-                      animate="in"
-                      exit="out"
-                      transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                    >
-                      <LotteryPage />
-                    </motion.div>
-                  </Suspense>
-                ) : (
-                  <Navigate to="/welcome" replace state={{ from: location.pathname }} />
-                )
-              } />
-              <Route path="/admin/lottery" element={
-                user?.role === 'admin' ? (
-                  <Suspense fallback={<LoadingSpinner />}>
-                    <motion.div
-                      variants={pageVariants}
-                      initial="initial"
-                      animate="in"
-                      exit="out"
-                      transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                    >
-                      <LotteryAdmin />
-                    </motion.div>
-                  </Suspense>
-                ) : (
-                  <Navigate to="/" replace />
-                )
-              } />
-              <Route path="/admin/users" element={
-                user?.role === 'admin' ? (
-                  <motion.div
-                    variants={pageVariants}
-                    initial="initial"
-                    animate="in"
-                    exit="out"
-                    transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                  >
-                    <UserManagement />
-                  </motion.div>
-                ) : (
-                  <Navigate to="/" replace />
-                )
-              } />
-              <Route path="/admin" element={
-                user?.role === 'admin' ? (
-                  <Suspense fallback={<LoadingSpinner />}>
-                    <motion.div
-                      variants={pageVariants}
-                      initial="initial"
-                      animate="in"
-                      exit="out"
-                      transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                    >
-                      <AdminDashboard />
-                    </motion.div>
-                  </Suspense>
-                ) : (
-                  <Navigate to="/" replace />
-                )
-              } />
-              <Route path="/logshare" element={
-                <motion.div
-                  variants={pageVariants}
-                  initial="initial"
-                  animate="in"
-                  exit="out"
-                  transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                >
-                  <LogShare />
-                </motion.div>
-              } />
-              <Route path="/case-converter" element={
-                <motion.div
-                  variants={pageVariants}
-                  initial="initial"
-                  animate="in"
-                  exit="out"
-                  transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                >
-                  <CaseConverter />
-                </motion.div>
-              } />
-              <Route path="/email-sender" element={
-                user?.role === 'admin' ? (
-                  <motion.div
-                    variants={pageVariants}
-                    initial="initial"
-                    animate="in"
-                    exit="out"
-                    transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                  >
+                } />
+                <Route path="/admin/lottery" element={
+                  user?.role === 'admin' ? (
                     <Suspense fallback={<LoadingSpinner />}>
-                      <EmailSenderPage />
+                      <m.div
+                        variants={pageVariants}
+                        initial="initial"
+                        animate="in"
+                        exit="out"
+                        transition={pageTransition}
+                      >
+                        <LotteryAdmin />
+                      </m.div>
                     </Suspense>
-                  </motion.div>
-                ) : (
-                  <Navigate to="/" replace />
-                )
-              } />
-              <Route path="/profile" element={
-                <Suspense fallback={<LoadingSpinner />}>
-                  <motion.div
-                    variants={pageVariants}
-                    initial="initial"
-                    animate="in"
-                    exit="out"
-                    transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                  >
-                    <UserProfile />
-                  </motion.div>
-                </Suspense>
-              } />
-              <Route path="/outemail" element={
-                <motion.div
-                  variants={pageVariants}
-                  initial="initial"
-                  animate="in"
-                  exit="out"
-                  transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                >
-                  <OutEmail />
-                </motion.div>
-              } />
-              <Route path="/modlist" element={
-                <motion.div
-                  variants={pageVariants}
-                  initial="initial"
-                  animate="in"
-                  exit="out"
-                  transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                >
-                  <ModListPage />
-                </motion.div>
-              } />
-              <Route path="/smart-human-check" element={
-                <Suspense fallback={<LoadingSpinner />}>
-                  <motion.div
-                    variants={pageVariants}
-                    initial="initial"
-                    animate="in"
-                    exit="out"
-                    transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                  >
-                    <SmartHumanCheckTestPage />
-                  </motion.div>
-                </Suspense>
-              } />
-              <Route path="/image-upload" element={
-                user ? (
-                  <Suspense fallback={<LoadingSpinner />}>
-                    <motion.div
+                  ) : (
+                    <Navigate to="/" replace />
+                  )
+                } />
+                <Route path="/admin/users" element={
+                  user?.role === 'admin' ? (
+                    <m.div
                       variants={pageVariants}
                       initial="initial"
                       animate="in"
                       exit="out"
-                      transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
+                      transition={pageTransition}
                     >
-                      <ImageUploadPage />
-                    </motion.div>
-                  </Suspense>
-                ) : (
-                  <Navigate to="/welcome" replace state={{ from: location.pathname }} />
-                )
-              } />
-              <Route path="/librechat" element={
-                <Suspense fallback={<LoadingSpinner />}>
-                  <motion.div
+                      <UserManagement />
+                    </m.div>
+                  ) : (
+                    <Navigate to="/" replace />
+                  )
+                } />
+                <Route path="/admin" element={
+                  user?.role === 'admin' ? (
+                    <Suspense fallback={<LoadingSpinner />}>
+                      <m.div
+                        variants={pageVariants}
+                        initial="initial"
+                        animate="in"
+                        exit="out"
+                        transition={pageTransition}
+                      >
+                        <AdminDashboard />
+                      </m.div>
+                    </Suspense>
+                  ) : (
+                    <Navigate to="/" replace />
+                  )
+                } />
+                <Route path="/logshare" element={
+                  <m.div
                     variants={pageVariants}
                     initial="initial"
                     animate="in"
                     exit="out"
-                    transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
+                    transition={pageTransition}
                   >
-                    <LibreChatPage />
-                  </motion.div>
-                </Suspense>
-              } />
-              <Route path="/tiger-adventure" element={
-                <Suspense fallback={<LoadingSpinner />}>
-                  <motion.div
+                    <LogShare />
+                  </m.div>
+                } />
+                <Route path="/case-converter" element={
+                  <m.div
                     variants={pageVariants}
                     initial="initial"
                     animate="in"
                     exit="out"
-                    transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
+                    transition={pageTransition}
                   >
-                    <TigerAdventure />
-                  </motion.div>
-                </Suspense>
-              } />
-              <Route path="/coin-flip" element={
-                <Suspense fallback={<LoadingSpinner />}>
-                  <motion.div
-                    variants={pageVariants}
-                    initial="initial"
-                    animate="in"
-                    exit="out"
-                    transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                  >
-                    <CoinFlip />
-                  </motion.div>
-                </Suspense>
-              } />
-              <Route path="/markdown-export" element={
-                user ? (
-                  <Suspense fallback={<LoadingSpinner />}>
-                    <motion.div
+                    <CaseConverter />
+                  </m.div>
+                } />
+                <Route path="/email-sender" element={
+                  user?.role === 'admin' ? (
+                    <m.div
                       variants={pageVariants}
                       initial="initial"
                       animate="in"
                       exit="out"
-                      transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
+                      transition={pageTransition}
                     >
-                      <MarkdownExportPage />
-                    </motion.div>
+                      <Suspense fallback={<LoadingSpinner />}>
+                        <EmailSenderPage />
+                      </Suspense>
+                    </m.div>
+                  ) : (
+                    <Navigate to="/" replace />
+                  )
+                } />
+                <Route path="/profile" element={
+                  <Suspense fallback={<LoadingSpinner />}>
+                    <m.div
+                      variants={pageVariants}
+                      initial="initial"
+                      animate="in"
+                      exit="out"
+                      transition={pageTransition}
+                    >
+                      <UserProfile />
+                    </m.div>
                   </Suspense>
-                ) : (
-                  <Navigate to="/welcome" replace state={{ from: location.pathname }} />
-                )
-              } />
+                } />
+                <Route path="/outemail" element={
+                  <m.div
+                    variants={pageVariants}
+                    initial="initial"
+                    animate="in"
+                    exit="out"
+                    transition={pageTransition}
+                  >
+                    <OutEmail />
+                  </m.div>
+                } />
+                <Route path="/modlist" element={
+                  <m.div
+                    variants={pageVariants}
+                    initial="initial"
+                    animate="in"
+                    exit="out"
+                    transition={pageTransition}
+                  >
+                    <ModListPage />
+                  </m.div>
+                } />
+                <Route path="/smart-human-check" element={
+                  <Suspense fallback={<LoadingSpinner />}>
+                    <m.div
+                      variants={pageVariants}
+                      initial="initial"
+                      animate="in"
+                      exit="out"
+                      transition={pageTransition}
+                    >
+                      <SmartHumanCheckTestPage />
+                    </m.div>
+                  </Suspense>
+                } />
+                <Route path="/image-upload" element={
+                  user ? (
+                    <Suspense fallback={<LoadingSpinner />}>
+                      <m.div
+                        variants={pageVariants}
+                        initial="initial"
+                        animate="in"
+                        exit="out"
+                        transition={pageTransition}
+                      >
+                        <ImageUploadPage />
+                      </m.div>
+                    </Suspense>
+                  ) : (
+                    <Navigate to="/welcome" replace state={{ from: location.pathname }} />
+                  )
+                } />
+                <Route path="/librechat" element={
+                  <Suspense fallback={<LoadingSpinner />}>
+                    <m.div
+                      variants={pageVariants}
+                      initial="initial"
+                      animate="in"
+                      exit="out"
+                      transition={pageTransition}
+                    >
+                      <LibreChatPage />
+                    </m.div>
+                  </Suspense>
+                } />
+                <Route path="/tiger-adventure" element={
+                  <Suspense fallback={<LoadingSpinner />}>
+                    <m.div
+                      variants={pageVariants}
+                      initial="initial"
+                      animate="in"
+                      exit="out"
+                      transition={pageTransition}
+                    >
+                      <TigerAdventure />
+                    </m.div>
+                  </Suspense>
+                } />
+                <Route path="/coin-flip" element={
+                  <Suspense fallback={<LoadingSpinner />}>
+                    <m.div
+                      variants={pageVariants}
+                      initial="initial"
+                      animate="in"
+                      exit="out"
+                      transition={pageTransition}
+                    >
+                      <CoinFlip />
+                    </m.div>
+                  </Suspense>
+                } />
+                <Route path="/markdown-export" element={
+                  user ? (
+                    <Suspense fallback={<LoadingSpinner />}>
+                      <m.div
+                        variants={pageVariants}
+                        initial="initial"
+                        animate="in"
+                        exit="out"
+                        transition={pageTransition}
+                      >
+                        <MarkdownExportPage />
+                      </m.div>
+                    </Suspense>
+                  ) : (
+                    <Navigate to="/welcome" replace state={{ from: location.pathname }} />
+                  )
+                } />
 
-              {/* 资源商店相关路由 */}
-              <Route path="/store" element={
-                <Suspense fallback={<LoadingSpinner />}>
-                  <motion.div
-                    variants={pageVariants}
-                    initial="initial"
-                    animate="in"
-                    exit="out"
-                    transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                  >
-                    <ResourceStoreList />
-                  </motion.div>
-                </Suspense>
-              } />
-              <Route path="/store/resources/:id" element={
-                <Suspense fallback={<LoadingSpinner />}>
-                  <motion.div
-                    variants={pageVariants}
-                    initial="initial"
-                    animate="in"
-                    exit="out"
-                    transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                  >
-                    <ResourceStoreDetail />
-                  </motion.div>
-                </Suspense>
-              } />
-              <Route path="/admin/store" element={
-                user?.role === 'admin' ? (
+                {/* 资源商店相关路由 */}
+                <Route path="/store" element={
                   <Suspense fallback={<LoadingSpinner />}>
-                    <motion.div
+                    <m.div
                       variants={pageVariants}
                       initial="initial"
                       animate="in"
                       exit="out"
-                      transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
+                      transition={pageTransition}
                     >
-                      <AdminStoreDashboard />
-                    </motion.div>
+                      <ResourceStoreList />
+                    </m.div>
                   </Suspense>
-                ) : (
-                  <Navigate to="/admin/login" replace />
-                )
-              } />
-              <Route path="/admin/store/resources" element={
-                user?.role === 'admin' ? (
+                } />
+                <Route path="/store/resources/:id" element={
                   <Suspense fallback={<LoadingSpinner />}>
-                    <motion.div
+                    <m.div
                       variants={pageVariants}
                       initial="initial"
                       animate="in"
                       exit="out"
-                      transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
+                      transition={pageTransition}
                     >
-                      <ResourceStoreManager />
-                    </motion.div>
+                      <ResourceStoreDetail />
+                    </m.div>
                   </Suspense>
-                ) : (
-                  <Navigate to="/admin/login" replace />
-                )
-              } />
-              <Route path="/admin/store/cdks" element={
-                user?.role === 'admin' ? (
-                  <Suspense fallback={<LoadingSpinner />}>
-                    <motion.div
-                      variants={pageVariants}
-                      initial="initial"
-                      animate="in"
-                      exit="out"
-                      transition={{ type: "tween", ease: "easeInOut", duration: 0.4 }}
-                    >
-                      <CDKStoreManager />
-                    </motion.div>
-                  </Suspense>
-                ) : (
-                  <Navigate to="/admin/login" replace />
-                )
-              } />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </AnimatePresence>
-        </main>
-        <Footer />
+                } />
+                <Route path="/admin/store" element={
+                  user?.role === 'admin' ? (
+                    <Suspense fallback={<LoadingSpinner />}>
+                      <m.div
+                        variants={pageVariants}
+                        initial="initial"
+                        animate="in"
+                        exit="out"
+                        transition={pageTransition}
+                      >
+                        <AdminStoreDashboard />
+                      </m.div>
+                    </Suspense>
+                  ) : (
+                    <Navigate to="/admin/login" replace />
+                  )
+                } />
+                <Route path="/admin/store/resources" element={
+                  user?.role === 'admin' ? (
+                    <Suspense fallback={<LoadingSpinner />}>
+                      <m.div
+                        variants={pageVariants}
+                        initial="initial"
+                        animate="in"
+                        exit="out"
+                        transition={pageTransition}
+                      >
+                        <ResourceStoreManager />
+                      </m.div>
+                    </Suspense>
+                  ) : (
+                    <Navigate to="/admin/login" replace />
+                  )
+                } />
+                <Route path="/admin/store/cdks" element={
+                  user?.role === 'admin' ? (
+                    <Suspense fallback={<LoadingSpinner />}>
+                      <m.div
+                        variants={pageVariants}
+                        initial="initial"
+                        animate="in"
+                        exit="out"
+                        transition={pageTransition}
+                      >
+                        <CDKStoreManager />
+                      </m.div>
+                    </Suspense>
+                  ) : (
+                    <Navigate to="/admin/login" replace />
+                  )
+                } />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </AnimatePresence>
+          </main>
+          <Footer />
 
-        {/* TOTP管理器模态框 */}
-        <AnimatePresence>
-          {showTOTPManager && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 backdrop-blur-sm"
-              onClick={() => setShowTOTPManager(false)}
-            >
-              <motion.div
-                initial={{ scale: 0.9, opacity: 0, y: 20 }}
-                animate={{ scale: 1, opacity: 1, y: 0 }}
-                exit={{ scale: 0.9, opacity: 0, y: 20 }}
-                transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto"
-                onClick={(e) => e.stopPropagation()}
+          {/* TOTP管理器模态框 */}
+          <AnimatePresence>
+            {showTOTPManager && (
+              <m.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 backdrop-blur-sm"
+                onClick={() => setShowTOTPManager(false)}
               >
-                <div className="p-6">
-                  <div className="flex items-center justify-between mb-6">
-                    <h2 className="text-2xl font-bold text-gray-900">账户安全设置</h2>
-                    <button
-                      onClick={() => setShowTOTPManager(false)}
-                      className="text-gray-400 hover:text-gray-600 transition-colors"
-                      title="关闭"
-                    >
-                      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
+                <m.div
+                  initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                  animate={{ scale: 1, opacity: 1, y: 0 }}
+                  exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                  transition={prefersReducedMotion ? { duration: 0 } : TOTP_SPRING}
+                  className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="p-6">
+                    <div className="flex items-center justify-between mb-6">
+                      <h2 className="text-2xl font-bold text-gray-900">账户安全设置</h2>
+                      <button
+                        onClick={() => setShowTOTPManager(false)}
+                        className="text-gray-400 hover:text-gray-600 transition-colors"
+                        title="关闭"
+                      >
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                    <TOTPManager onStatusChange={handleTOTPStatusChange} />
                   </div>
-                  <TOTPManager onStatusChange={handleTOTPStatusChange} />
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                </m.div>
+              </m.div>
+            )}
+          </AnimatePresence>
 
-        {/* 水印覆盖层 */}
-        <AnimatePresence>
-          {showWatermark && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.5 }}
-            >
-              <WatermarkOverlay />
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
+          {/* 水印覆盖层 */}
+          <AnimatePresence>
+            {showWatermark && (
+              <m.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={overlayTransition}
+              >
+                <WatermarkOverlay />
+              </m.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </LazyMotion>
     </NotificationProvider>
   );
 };
@@ -1023,60 +1243,30 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
   render() {
     if (this.state.hasError) {
       return (
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className="min-h-screen flex items-center justify-center bg-gray-50"
-        >
+        <div className="min-h-screen flex items-center justify-center bg-gray-50">
           <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full">
-            <motion.div
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              transition={{ delay: 0.2 }}
-              className="w-20 h-20 mx-auto mb-6 bg-red-100 rounded-full flex items-center justify-center"
-            >
+            <div className="w-20 h-20 mx-auto mb-6 bg-red-100 rounded-full flex items-center justify-center">
               <svg className="w-12 h-12 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
-            </motion.div>
-            <motion.h2
-              initial={{ y: 20, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              transition={{ delay: 0.3 }}
-              className="text-2xl font-bold text-center text-gray-800 mb-4"
-            >
-              页面加载失败
-            </motion.h2>
-            <motion.p
-              initial={{ y: 20, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              transition={{ delay: 0.4 }}
-              className="text-gray-600 text-center mb-8"
-            >
-              抱歉，页面出现了一些问题。请尝试刷新页面或稍后重试。
-            </motion.p>
-            <motion.button
-              initial={{ y: 20, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              transition={{ delay: 0.5 }}
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
+            </div>
+            <h2 className="text-2xl font-bold text-center text-gray-800 mb-4">页面加载失败</h2>
+            <p className="text-gray-600 text-center mb-8">抱歉，页面出现了一些问题。请尝试刷新页面或稍后重试。</p>
+            <button
               onClick={() => {
                 try {
                   window.location.reload();
                 } catch (error) {
                   console.error('页面刷新失败:', error);
-                  // 备用方案：清除错误状态
                   this.setState({ hasError: false });
                 }
               }}
               className="w-full py-3 bg-gradient-to-r from-red-500 to-pink-500 text-white rounded-xl font-medium shadow-lg hover:shadow-xl transition-all duration-300"
             >
               刷新页面
-            </motion.button>
+            </button>
           </div>
-        </motion.div>
+        </div>
       );
     }
     return this.props.children;

@@ -1,8 +1,24 @@
 import { Request, Response } from 'express';
 import { getAllMods, addMod as addModStorage, updateMod as updateModStorage, deleteMod as deleteModStorage, batchAddMods as batchAddModsService, batchDeleteMods as batchDeleteModsService } from '../services/modlistStorage';
 import * as crypto from 'crypto';
+import { mongoose } from '../services/mongoService';
 
-const MODIFY_CODE = process.env.MODIFY_CODE || '123456';
+// 使用 MongoDB 存储和读取修改码（MODIFY_CODE），不再读取环境变量
+const ModlistSettingSchema = new mongoose.Schema({
+  key: { type: String, default: 'MODIFY_CODE' },
+  code: { type: String, required: true },
+  updatedAt: { type: Date, default: Date.now }
+}, { collection: 'modlist_settings' });
+const ModlistSettingModel = mongoose.models.ModlistSetting || mongoose.model('ModlistSetting', ModlistSettingSchema);
+
+async function getModifyCodeFromDb(): Promise<string | null> {
+  try {
+    const doc = await ModlistSettingModel.findOne({ key: 'MODIFY_CODE' }).lean().exec() as { code?: string } | null;
+    return (doc && typeof doc.code === 'string' && doc.code.length > 0) ? doc.code : null;
+  } catch {
+    return null;
+  }
+}
 
 export const getModList = async (req: Request, res: Response) => {
   try {
@@ -104,79 +120,195 @@ export const getModList = async (req: Request, res: Response) => {
 };
 
 export const getModListJson = async (req: Request, res: Response) => {
+  try {
+    console.log('📋 [ModListJson] 开始处理JSON格式MOD列表请求...');
+    console.log('   用户ID:', req.user?.id ?? '未登录');
+    console.log('   用户名:', req.user?.username ?? '未登录');
+    console.log('   用户角色:', req.user?.role ?? 'guest');
+    console.log('   请求IP:', req.ip);
+    
   const { withHash, withMd5 } = req.query;
   const mods = await getAllMods({
     withHash: withHash === '1' || withHash === 'true',
     withMd5: withMd5 === '1' || withMd5 === 'true',
   });
+    
+    console.log('📊 [ModListJson] 获取到MOD数量:', mods.length);
+    console.log('✅ [ModListJson] JSON格式MOD列表请求处理完成');
+    
   res.json(mods);
+  } catch (error) {
+    console.error('❌ [ModListJson] 获取JSON格式MOD列表失败:', error);
+    res.status(500).json({ error: '获取MOD列表失败' });
+  }
 };
 
 export const addMod = async (req: Request, res: Response) => {
+  try {
+    console.log('➕ [AddMod] 开始处理添加MOD请求...');
+    console.log('   用户ID:', req.user?.id ?? '未登录');
+    console.log('   用户名:', req.user?.username ?? '未登录');
+    console.log('   用户角色:', req.user?.role ?? 'guest');
+    console.log('   请求IP:', req.ip);
+    
   const { name, code, hash, md5 } = req.body;
   if (!name || typeof name !== 'string') {
+      console.log('❌ [AddMod] 参数错误：MOD名为空或格式错误');
     return res.status(400).json({ error: 'MOD名不能为空' });
   }
-  if (code !== MODIFY_CODE) {
+    
+    console.log('📝 [AddMod] 请求添加MOD名称:', name);
+    
+  const expected = await getModifyCodeFromDb();
+  if (!expected || code !== expected) {
+      console.log('❌ [AddMod] 修改码校验失败');
     return res.status(403).json({ error: '修改码错误' });
   }
-  try {
+    
+    console.log('✅ [AddMod] 修改码校验通过');
+    
     const newMod = await addModStorage({ name, hash, md5 });
+    console.log('✅ [AddMod] 添加成功，MOD ID:', newMod.id);
+    
     res.json({ success: true, mod: newMod });
   } catch (e: any) {
+    console.error('❌ [AddMod] 添加失败:', e);
     res.status(409).json({ error: e.message || '添加失败' });
   }
 };
 
 export const updateMod = async (req: Request, res: Response) => {
+  try {
+    console.log('✏️ [UpdateMod] 开始处理更新MOD请求...');
+    console.log('   用户ID:', req.user?.id ?? '未登录');
+    console.log('   用户名:', req.user?.username ?? '未登录');
+    console.log('   用户角色:', req.user?.role ?? 'guest');
+    console.log('   请求IP:', req.ip);
+    
   const { id } = req.params;
   const { name, code, hash, md5 } = req.body;
   if (!id || !name || typeof name !== 'string') {
+      console.log('❌ [UpdateMod] 参数错误：ID或名称为空或格式错误');
     return res.status(400).json({ error: '参数错误' });
   }
-  if (code !== MODIFY_CODE) {
+    
+    console.log('📝 [UpdateMod] 请求更新MOD ID:', id, '名称:', name);
+    
+  const expected = await getModifyCodeFromDb();
+  if (!expected || code !== expected) {
+      console.log('❌ [UpdateMod] 修改码校验失败');
     return res.status(403).json({ error: '修改码错误' });
   }
-  try {
+    
+    console.log('✅ [UpdateMod] 修改码校验通过');
+    
     const mod = await updateModStorage(id, name, hash, md5);
+    console.log('✅ [UpdateMod] 更新成功，MOD ID:', mod.id);
+    
     res.json({ success: true, mod });
   } catch (e: any) {
+    console.error('❌ [UpdateMod] 更新失败:', e);
     res.status(404).json({ error: e.message || '修改失败' });
   }
 };
 
 export const deleteMod = async (req: Request, res: Response) => {
+  try {
+    console.log('🗑️ [DeleteMod] 开始处理删除MOD请求...');
+    console.log('   用户ID:', req.user?.id ?? '未登录');
+    console.log('   用户名:', req.user?.username ?? '未登录');
+    console.log('   用户角色:', req.user?.role ?? 'guest');
+    console.log('   请求IP:', req.ip);
+    
   const { id } = req.params;
   const { code } = req.body;
-  if (code !== MODIFY_CODE) {
+    
+    console.log('📝 [DeleteMod] 请求删除MOD ID:', id);
+    
+  const expected = await getModifyCodeFromDb();
+  if (!expected || code !== expected) {
+      console.log('❌ [DeleteMod] 修改码校验失败');
     return res.status(403).json({ error: '修改码错误' });
   }
-  try {
+    
+    console.log('✅ [DeleteMod] 修改码校验通过');
+    
     await deleteModStorage(id);
+    console.log('✅ [DeleteMod] 删除成功，MOD ID:', id);
+    
     res.json({ success: true });
   } catch (e: any) {
+    console.error('❌ [DeleteMod] 删除失败:', e);
     res.status(404).json({ error: e.message || '删除失败' });
   }
 };
 
 export const batchAddMods = async (req: Request, res: Response) => {
-  const mods = req.body;
-  if (!Array.isArray(mods)) return res.status(400).json({ error: '参数必须为数组' });
   try {
+    console.log('📦 [BatchAddMods] 开始处理批量添加MOD请求...');
+    console.log('   用户ID:', req.user?.id ?? '未登录');
+    console.log('   用户名:', req.user?.username ?? '未登录');
+    console.log('   用户角色:', req.user?.role ?? 'guest');
+    console.log('   请求IP:', req.ip);
+    
+    const { mods, code } = req.body;
+    if (!Array.isArray(mods)) {
+      console.log('❌ [BatchAddMods] 参数错误：不是数组格式');
+      return res.status(400).json({ error: '参数必须为数组' });
+    }
+    
+    console.log('📊 [BatchAddMods] 请求添加MOD数量:', mods.length);
+    
+    // 校验修改码
+    const expected = await getModifyCodeFromDb();
+    if (!expected || code !== expected) {
+      console.log('❌ [BatchAddMods] 修改码校验失败');
+      return res.status(403).json({ error: '修改码错误' });
+    }
+    
+    console.log('✅ [BatchAddMods] 修改码校验通过');
+    
     const added = await batchAddModsService(mods);
+    console.log('✅ [BatchAddMods] 批量添加成功，添加数量:', added.length);
+    
     res.json({ success: true, added });
   } catch (e: any) {
+    console.error('❌ [BatchAddMods] 批量添加失败:', e);
     res.status(500).json({ error: e.message || '批量添加失败' });
   }
 };
 
 export const batchDeleteMods = async (req: Request, res: Response) => {
-  const ids = req.body;
-  if (!Array.isArray(ids)) return res.status(400).json({ error: '参数必须为数组' });
   try {
+    console.log('🗑️ [BatchDeleteMods] 开始处理批量删除MOD请求...');
+    console.log('   用户ID:', req.user?.id ?? '未登录');
+    console.log('   用户名:', req.user?.username ?? '未登录');
+    console.log('   用户角色:', req.user?.role ?? 'guest');
+    console.log('   请求IP:', req.ip);
+    
+    const { ids, code } = req.body;
+    if (!Array.isArray(ids)) {
+      console.log('❌ [BatchDeleteMods] 参数错误：不是数组格式');
+      return res.status(400).json({ error: '参数必须为数组' });
+    }
+    
+    console.log('📊 [BatchDeleteMods] 请求删除MOD数量:', ids.length);
+    
+    // 校验修改码
+    const expected = await getModifyCodeFromDb();
+    if (!expected || code !== expected) {
+      console.log('❌ [BatchDeleteMods] 修改码校验失败');
+      return res.status(403).json({ error: '修改码错误' });
+    }
+    
+    console.log('✅ [BatchDeleteMods] 修改码校验通过');
+    
     const result = await batchDeleteModsService(ids);
+    console.log('✅ [BatchDeleteMods] 批量删除成功，删除结果:', result);
+    
     res.json({ success: true, ...result });
   } catch (e: any) {
+    console.error('❌ [BatchDeleteMods] 批量删除失败:', e);
     res.status(500).json({ error: e.message || '批量删除失败' });
   }
 }; 
