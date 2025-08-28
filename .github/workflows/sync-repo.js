@@ -8,7 +8,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const os = require('os');
 
-const REMOTE_REPO = 'https://github.com/Happy-clo/Happy-TTS.git';
+const REMOTE_REPO = 'https://github.com/devhappys/Happy-TTS.git';
 const LOCAL_REPO = path.resolve(__dirname, '..');
 const TEMP_DIR = path.join(os.tmpdir(), 'repo-sync-tmp');
 const EXCLUDE_DIRS = ['.github', '.git', 'node_modules', 'dist-obfuscated'];
