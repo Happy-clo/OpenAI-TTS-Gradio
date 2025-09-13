@@ -1,7 +1,7 @@
 name: Sync from Happy-TTS
 
 on:
-  push:
+  
   schedule:
     - cron: "0 2 * * *" # 每天凌晨2点
   workflow_dispatch:
