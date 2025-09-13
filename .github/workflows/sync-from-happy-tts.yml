@@ -1,6 +1,7 @@
 name: Sync from Happy-TTS
 
 on:
+  push:
   schedule:
     - cron: "0 2 * * *" # 每天凌晨2点
   workflow_dispatch:
@@ -21,7 +22,7 @@ jobs:
           node-version: "20"
 
       - name: 安装依赖
-        run: npm install simple-git fs-extra
+        run: npm install -g simple-git fs-extra
 
       - name: 执行同步脚本
         env:
